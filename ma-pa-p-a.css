@@ -1,0 +1,128 @@
+#mapapa,
+#mapapa.light {
+  color-scheme: light;
+  --board: #e0e0e0;
+  --paper: #ffffff;
+  --title: #000000;
+  --notes: #3f3f3f;
+  --frame: #ffdb18;
+  --glare: #ff65e9;
+  --paint: #65fefe;
+}
+#mapapa.dark {
+  color-scheme: dark;
+  --board: #1f1f1f;
+  --paper: #000000;
+  --title: #ffffff;
+  --notes: #c0c0c0;
+  --frame: #ffdb18;
+  --glare: #ff65e9;
+  --paint: #2776a7;
+}
+
+#mapapa {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5em;
+  padding: 0.5em;
+  width: calc(100% - 1em);
+  height: calc(100% - 1em);
+
+  background-color: var(--board);
+  color: var(--notes);
+}
+#mapapa > * {
+  border: 1px solid var(--notes);
+}
+#mapapa .tp-grid::before {
+  content: "";
+  position: absolute;
+  width: 100%;
+  height: 100%;
+  left: 0;
+  top: 0;
+  background-image: repeating-linear-gradient(0deg, black 0 var(--grid-size), white 0 calc(2 * var(--grid-size))),
+    repeating-linear-gradient(90deg, black 0 var(--grid-size), white 0 calc(2 * var(--grid-size)));
+  background-blend-mode: difference;
+  opacity: 0.1;
+  pointer-events: none;
+}
+
+/* uploader */
+
+#mapapa > #uploader {
+  border-style: dashed;
+  height: 3em;
+  line-height: 3em;
+  text-align: center;
+
+  & > span {
+    pointer-events: none;
+    display: none;
+    white-space: nowrap;
+  }
+  & > input {
+    pointer-events: none;
+    flex: 1 1 auto;
+    padding: 0 0.5em;
+  }
+  &.dragover > span {
+    display: initial;
+  }
+  &.dragover > input {
+    display: none;
+  }
+}
+
+/* palettle */
+
+#mapapa > #palettle {
+  flex: 0 1 auto;
+  padding: 0.3em;
+  --grid-size: 4px;
+
+  & > a {
+    position: relative;
+    display: inline-block;
+    padding: 0.5em;
+    margin: 0 0.1em;
+    border: 1px solid var(--notes);
+  }
+}
+
+/* textures */
+
+#mapapa > #textures {
+  flex: 1 1 32em;
+  min-height: 6em;
+  padding: 0.3em;
+  position: relative;
+  overflow: hidden;
+  background: var(--paper);
+  --grid-size: 16px;
+
+  & > #images {
+    position: relative;
+    height: 100%;
+    overflow-y: scroll;
+    user-select: none;
+
+    /* scrollbar-width: 0;
+    &::-webkit-scrollbar {
+      display: none;
+    } */
+
+    & > canvas {
+      position: relative;
+      margin: 0 0.1em;
+      border: 1px solid var(--notes);
+      max-width: calc(100% - 2px - 0.2em);
+      cursor: crosshair;
+
+      &.loading {
+        width: 64px;
+        height: 64px;
+      }
+    }
+  }
+}
