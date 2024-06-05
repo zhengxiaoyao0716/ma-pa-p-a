@@ -1,5 +1,5 @@
-#mapapa,
-#mapapa.light {
+.mppa,
+.mppa.light {
   color-scheme: light;
   --board: #e0e0e0;
   --paper: #ffffff;
@@ -9,7 +9,7 @@
   --glare: #ff65e9;
   --paint: #65fefe;
 }
-#mapapa.dark {
+.mppa.dark {
   color-scheme: dark;
   --board: #1f1f1f;
   --paper: #000000;
@@ -20,7 +20,7 @@
   --paint: #2776a7;
 }
 
-#mapapa {
+.mppa {
   display: flex;
   flex-direction: column;
   gap: 0.5em;
@@ -31,52 +31,69 @@
   background-color: var(--board);
   color: var(--notes);
 }
-#mapapa > * {
-  border: 1px solid var(--notes);
+.mppa a {
+  text-decoration: none;
 }
-#mapapa .tp-grid::before {
+
+.mppa .tp-grid {
+  background: var(--paper);
+}
+.mppa .tp-grid::before {
   content: "";
   position: absolute;
   width: 100%;
   height: 100%;
   left: 0;
   top: 0;
-  background-image: repeating-linear-gradient(0deg, black 0 var(--grid-size), white 0 calc(2 * var(--grid-size))),
-    repeating-linear-gradient(90deg, black 0 var(--grid-size), white 0 calc(2 * var(--grid-size)));
+  background-image: repeating-linear-gradient(
+      0deg,
+      black 0 var(--grid-size),
+      white 0 calc(2 * var(--grid-size))
+    ),
+    repeating-linear-gradient(
+      90deg,
+      black 0 var(--grid-size),
+      white 0 calc(2 * var(--grid-size))
+    );
   background-blend-mode: difference;
   opacity: 0.1;
   pointer-events: none;
 }
 
-/* uploader */
+/* titlebar */
 
-#mapapa > #uploader {
-  border-style: dashed;
+.mppa > #titlebar {
+  border: 1px dashed var(--notes);
   height: 3em;
   line-height: 3em;
-  text-align: center;
 
-  & > span {
+  & > * {
     pointer-events: none;
-    display: none;
     white-space: nowrap;
   }
-  & > input {
-    pointer-events: none;
-    flex: 1 1 auto;
+  & > .drag-tips {
+    display: none;
+  }
+  &.dragover > .drag-tips {
+    display: block;
+    text-align: center;
+  }
+  &.dragover > .controller {
+    display: none;
+  }
+
+  & > .controller > * {
     padding: 0 0.5em;
   }
-  &.dragover > span {
-    display: initial;
-  }
-  &.dragover > input {
-    display: none;
+  & > .controller > a {
+    pointer-events: visible;
   }
 }
 
 /* palettle */
 
-#mapapa > #palettle {
+.mppa > #palettle {
+  border: 1px solid var(--notes);
   flex: 0 1 auto;
   padding: 0.3em;
   --grid-size: 4px;
@@ -92,13 +109,12 @@
 
 /* textures */
 
-#mapapa > #textures {
+.mppa > #textures {
   flex: 1 1 32em;
   min-height: 6em;
   padding: 0.3em;
   position: relative;
   overflow: hidden;
-  background: var(--paper);
   --grid-size: 16px;
 
   & > #images {

@@ -14,8 +14,8 @@
       :root,
       body {
         position: absolute;
-        width: 100vw;
-        height: 100vh;
+        width: 100dvw;
+        height: 100dvh;
         margin: 0;
         padding: 0;
         overflow: hidden;
@@ -24,28 +24,10 @@
   </head>
 
   <body>
-    <!-- Usage 1. Traditional -->
     <link rel="stylesheet" href="./ma-pa-p-a.css" />
-    <div id="mapapa" class="dark"></div>
+    <div class="mppa dark"></div>
     <script>
       import("./ma-pa-p-a.js").then(({ App, render }) => render(new App()));
     </script>
-
-    <!-- -->
-
-    <!-- Usage 2. Inject Style -->
-    <!-- <script>
-      import("./ma-pa-p-a.js").then(({ App, createRoot, createStyle }) =>
-        document.body.append(createStyle(), createRoot(new App(), { theme: "dark" }))
-      );
-    </script> -->
-
-    <!-- -->
-
-    <!-- Usage 3. Web Components -->
-    <!-- <script>
-      import("./ma-pa-p-a.js").then(({ init }) => init());
-    </script>
-    <ma-pa-p-a theme="dark"></ma-pa-p-a> -->
   </body>
 </html>
