@@ -5,7 +5,7 @@
 
 ## Usage
 
-Usage 1. Traditional
+Usage 1. Traditional (style+html+script)
 
 ```html
 <link rel="stylesheet" href="./ma-pa-p-a.css" />
@@ -15,7 +15,7 @@ Usage 1. Traditional
 </script>
 ```
 
-Usage 2. Inject Style
+Usage 2. Inject Style (script-only)
 
 ```html
 <script>
@@ -25,7 +25,7 @@ Usage 2. Inject Style
 </script>
 ```
 
-Usage 3. Web Components
+Usage 3. Web Components (shadow-dom)
 
 ```html
 <script>

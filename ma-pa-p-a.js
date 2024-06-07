@@ -3,20 +3,19 @@
  * https://github.com/zhengxiaoyao0716/ma-pa-p-a
  */
 
+const TAG = "[ma-pa-p-a]";
+
 /**
- * @typedef {import("./types").Texture} Texture
- * @typedef {import("./types").GLChunk} GLChunk
- * @typedef {import("./types").MsgData} MsgData
+ * @typedef {import("./types").Palette} Palette
+ * @typedef {import("./types").Archive} Archive
  */
 
 /** Magic Palette for Pixel Arts Application */
 export class App extends EventTarget {
-  /** @type {Worker[]} */
-  workers = [];
-  /** @type {Map<number, number>} */
-  palettle = new Map();
-  /** @type {{[name: string]: Texture}} */
-  textures = {};
+  /** @type {{[code: string]: Palette}} */
+  palettes = {};
+  /** @type {{[name: string]: Archive}} */
+  archives = {};
 
   constructor({
     imageLimit = 16, // 16MB
@@ -27,135 +26,201 @@ export class App extends EventTarget {
     this.imageLimit = imageLimit;
     this.chunkSize = chunkSize;
     this.workersNum = workersNum;
-    this.workerPollIndex = 0;
   }
 
   //#region worker pools
 
+  /** @type {WorkerService[]} */ workers = [];
+
+  //
+
   get workersNum() {
     return this.workers.length;
   }
-
   set workersNum(num) {
-    const { length } = this.workers;
-    if (num <= length) {
-      for (let i = num; i < length; i++) {
-        const worker = this.workers.pop();
-        // worker.terminate();
-        worker.postMessage({ type: "safe-close" });
-      }
-      return;
-    }
-    const url = new URL("./ma-pa-p-a.worker.js", import.meta.url);
-    /** @param {MessageEvent<{type: keyof MsgData}>} event . */
-    const onMessage = ({ data: { type, ...data } }) => {
-      this.response[type].call(this, data);
-    };
-    for (let i = length; i < num; i++) {
-      const worker = new Worker(url, { name: `MaPaPA-Worker#${i}` });
-      worker.addEventListener("message", onMessage);
-      this.workers.push(worker);
-    }
+    WorkerService.resize(this.workers, num, this.handlers);
   }
 
   /** @type {import("./types").MsgRequest} */
-  request = ({ trans, ...req }) => {
-    const worker = this.workers[this.workerPollIndex];
-    this.workerPollIndex = (1 + this.workerPollIndex) % this.workers.length;
-    worker.postMessage(req, trans);
+  request = (type, body) => {
+    const worker = WorkerService.idle(this.workers);
+    worker.postMessage({ type, body }, body.trans);
   };
 
-  /** @type {import("./types").MsgResponse} */
-  response = {
+  /** @type {import("./types").MsgHandlers} */
+  handlers = {
     parseGzip: ({ name, buffer }) => {
       // TODO
       console.log("TODO on parsed gzip", name, buffer);
     },
-    parseImage: ({ name, ...chunk }) => {
-      const colorNum = (this.palettle.size + chunk.plte.length) >> 1;
+
+    parseImage: ({ arch, chunk, data, plte, trans: [output, count] }) => {
+      const colorNum = plte.byteLength >> 2;
       if (colorNum > 256) {
         console.error(
-          `[ma-pa-p-a] too many colors, name: ${name}, limit: ${256}, count: ${colorNum}+`
+          `${TAG} too many colors, name: ${arch}, limit: ${256}, count: ${colorNum}+`
         );
         return;
       }
-      for (let i = 0; i < chunk.plte.length; i += 2) {
-        const color = chunk.plte[i];
-        const count = chunk.plte[i + 1];
-        this.palettle.set(color, (this.palettle.get(color) ?? 0) + count);
+      const { canvas, chunks } = this.archives[arch];
+      const { rect } = chunks[chunk];
+      chunks[chunk] = { rect, texture: { data, plte } };
+
+      const colors = new DataView(plte.buffer);
+      const counter = new DataView(count);
+      for (let i = 0; i < colors.byteLength; i += 4) {
+        const color = colors.getUint32(i);
+        const count = counter.getUint32(i, true);
+        const code = color.toString(16).toUpperCase();
+        const palette =
+          this.palettes[code] ??
+          (this.palettes[code] = {
+            color,
+            count: 0,
+            refer: {},
+          });
+        palette.count += count;
+        const refer = palette.refer[arch] ?? (palette.refer[arch] = []);
+        refer.push({ chunk, offset: i });
       }
       this.dispatchEvent(
-        new CustomEvent("updatePalette", { detail: this.palettle })
+        new CustomEvent("updatePalette", { detail: this.palettes })
       );
-      const { $canvas } = this.textures[name];
-      // ctx.putImageData(new ImageData(data, w, h), x, y);
-      /** @type {GLChunk} */
-      $canvas.dispatchEvent(new CustomEvent("fillChunk", { detail: chunk }));
+      const ctx = canvas.getContext("2d");
+      ctx.drawImage(output, ...rect);
+    },
+
+    updateChunk: ({ arch, chunk, data, plte, trans: [output] }) => {
+      const { canvas, chunks } = this.archives[arch];
+      const { rect } = chunks[chunk];
+      chunks[chunk] = { rect, texture: { data, plte } };
+      const ctx = canvas.getContext("2d");
+      ctx.clearRect(...rect);
+      ctx.drawImage(output, ...rect);
     },
   };
 
   //#endregion
 
+  //#region palette operate
+
+  /** @type {{[arch: string]: Set<number> }} */ dirtyChunks = {};
+
+  flushDirty() {
+    for (const [arch, chunks] of Object.entries(this.dirtyChunks)) {
+      const archives = this.archives[arch];
+      for (const chunk of chunks) {
+        const { rect, texture } = archives.chunks[chunk];
+        if (texture == null) continue;
+        const { data, plte } = texture;
+        this.request("updateChunk", {
+          arch,
+          chunk,
+          width: rect[2],
+          height: rect[3],
+          data,
+          plte,
+          trans: [plte.buffer, data.buffer],
+        });
+      }
+    }
+    this.dirtyChunks = {};
+  }
+
+  /**
+   * toggle color disable status.
+   *
+   * @param {string} code .
+   * @param {number} color .
+   */
+  replaceColor(code, color) {
+    const palette = this.palettes[code];
+    if (palette == null) return;
+    for (const [arch, refer] of Object.entries(palette.refer)) {
+      const chunks =
+        this.dirtyChunks[arch] ?? (this.dirtyChunks[arch] = new Set());
+      const archives = this.archives[arch];
+      for (const { chunk, offset } of refer) {
+        const { texture } = archives.chunks[chunk];
+        if (texture == null) continue;
+        chunks.add(chunk);
+        const { plte } = texture;
+        plte.set(parseRGBA(color), offset);
+      }
+    }
+  }
+
+  /**
+   * toggle color disable status.
+   *
+   * @param {string} code .
+   * @param {boolean} disable .
+   */
+  disableColor(code, disable) {
+    const palette = this.palettes[code];
+    if (palette == null) return;
+    this.replaceColor(code, disable ? 0x00000000 : palette.color);
+  }
+
+  //#endregion
+
   /**
    * render image
-   * @param {Texture} texture .
+   * @param {Archive} archive .
    * @param {HTMLImageElement} $image .
    */
-  parseImage({ name, $canvas }, $image) {
-    $canvas.width = $image.width;
-    $canvas.height = $image.height;
-    let indexer = 0;
+  parseImageData({ canvas, chunks }, $image) {
+    canvas.width = $image.width;
+    canvas.height = $image.height;
+    const arch = canvas.title;
     for (const rect of chunkRects($image, this.chunkSize)) {
-      const id = indexer++;
-      window.createImageBitmap($image, ...rect).then((bitmap) => {
-        this.request({
-          type: "parseImage",
-          name,
-          id,
-          rect,
-          bitmap,
-          trans: [bitmap],
+      const id = chunks.length;
+      chunks.push({ rect });
+      window.createImageBitmap($image, ...rect).then((source) => {
+        this.request("parseImage", {
+          arch,
+          chunk: id,
+          trans: [source],
         });
       });
     }
-    new WebGLService($canvas).init();
   }
 
   /** @param {File} file . */
-  parseTexture(file) {
+  parseImageFile(file) {
     if (file.size > this.imageLimit << 20) {
       const size = (file.size / 1024).toFixed(2);
       console.error(
-        `[ma-pa-p-a] file too large, size: ${size}KB, max: ${this.imageLimit}MB`
+        `${TAG} file too large, size: ${size}KB, max: ${this.imageLimit}MB`
       );
       return;
     }
-    if (file.name in this.textures) {
-      console.warn(`[ma-pa-p-a] duplicated file, name: ${file.name}`);
+    if (file.name in this.archives) {
+      console.warn(`${TAG} duplicated file, name: ${file.name}`);
       return;
     }
-    /** @type {Texture} */ const texture = {
-      name: file.name,
-      $canvas: document.createElement("canvas"),
+    /** @type {Archive} */ const archive = {
+      canvas: document.createElement("canvas"),
+      chunks: [],
     };
-    texture.$canvas.title = file.name;
-    texture.$canvas.classList.add("loading");
+    archive.canvas.title = file.name;
+    archive.canvas.classList.add("loading");
 
     const $image = new Image();
     $image.addEventListener("load", (event) => {
-      this.parseImage(texture, event.currentTarget);
-      texture.$canvas.classList.remove("loading");
+      this.parseImageData(archive, event.currentTarget);
+      archive.canvas.classList.remove("loading");
       URL.revokeObjectURL($image.src);
     });
     $image.src = URL.createObjectURL(file);
 
-    this.textures[file.name] = texture;
-    this.dispatchEvent(new CustomEvent("createImage", { detail: texture }));
+    this.archives[file.name] = archive;
+    this.dispatchEvent(new CustomEvent("createImage", { detail: archive }));
   }
 
   clearCache() {
-    this.palettle = new Map();
-    this.textures = {};
+    this.palettes = {};
+    this.archives = {};
     this.dispatchEvent(new CustomEvent("clear"));
   }
 
@@ -167,19 +232,18 @@ export class App extends EventTarget {
       switch (source.name.slice(1 + index)) {
         case "png":
         case "webp": {
-          this.parseTexture(source);
+          this.parseImageFile(source);
           break;
         }
         case "mppa": {
-          this.request({
-            type: "parseGzip",
+          this.request("parseGzip", {
             url: URL.createObjectURL(source),
             name: source.name.slice(0, index),
           });
           break;
         }
         default: {
-          console.warn(`unknown file type, name: ${source.name}`);
+          console.warn(`${TAG} unknown file type, name: ${source.name}`);
           break;
         }
       }
@@ -188,173 +252,107 @@ export class App extends EventTarget {
   };
 }
 
-class WebGLService {
-  static GLSL_CODES = {
-    VERTEX_SHADER: `#version 300 es
-precision highp float;
+//
 
-layout (location = 0) in vec2 vertex;
-out vec2 uv;
-
-uniform vec2 trans;
-uniform vec2 offset;
-
-void main() {
-  vec2 pos = vertex * trans * 2.0;
-  pos = vec2(pos.x - 1.0, 1.0 - pos.y);
-  uv = vertex - offset;
-
-  gl_Position = vec4(pos, 0.0, 1.0);
-}
-`,
-    FRAGMENT_SHADER: `#version 300 es
-precision highp int;
-precision highp float;
-
-in vec2 uv;
-out vec4 fragColor;
-
-uniform lowp usampler2D dataTex;
-uniform sampler2D colorsMap;
-
-void main() {
-  lowp uint index = texelFetch(dataTex, ivec2(uv), 0).r;
-  fragColor = texelFetch(colorsMap, ivec2(index, 0), 0);
-}
-`,
-  };
-
+class WorkerService {
   /**
-   * constructor.
+   * resize worker services.
    *
-   * @param {HTMLCanvasElement} $canvas .
-   * @param {number} chunkNum .
+   * @param {WorkerService[]} services .
+   * @param {number} num .
+   * @param {import("./types").MsgHandlers} handlers .
    */
-  constructor($canvas) {
-    const gl = $canvas.getContext("webgl2", { preserveDrawingBuffer: true });
-    if (gl == null) {
-      throw new Error("your browser doesn't support WebGL2.");
+  static resize(services, num, handlers) {
+    const { length } = services;
+    if (num <= length) {
+      for (let i = num; i < length; i++) {
+        const service = services.pop();
+        service._safelyTerminate();
+      }
+      return;
     }
-    const program = gl.createProgram();
-    if (program == null) {
-      throw new Error("create shader program failed.");
+    for (let i = length; i < num; i++) {
+      const service = new WorkerService();
+      service._handle(handlers);
+      services.push(service);
     }
-    linkShaderProgram(gl, program, WebGLService.GLSL_CODES);
-    this.gl = gl;
-    this.program = program;
-  }
-
-  init() {
-    const { gl, program } = this;
-
-    // #region vertexArray
-    this.vertexArray = gl.createVertexArray();
-    gl.bindVertexArray(this.vertexArray);
-
-    const indicesBuffer = gl.createBuffer();
-    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indicesBuffer);
-    const pointsBuffer = gl.createBuffer();
-    gl.bindBuffer(gl.ARRAY_BUFFER, pointsBuffer);
-
-    const vertexLoc = 0;
-    gl.vertexAttribPointer(vertexLoc, 2, gl.FLOAT, false, 0, 0);
-    gl.enableVertexAttribArray(vertexLoc);
-
-    gl.bindVertexArray(null);
-    //#endregion
-
-    this.offsetLoc = gl.getUniformLocation(program, "offset");
-
-    /** @type {WebGLTexture[]} */ this.textures = [];
-    this.dataTexLoc = gl.getUniformLocation(program, "dataTex");
-    this.colorsMapLoc = gl.getUniformLocation(program, "colorsMap");
-    for (let i = 0; i < 2; i++) {
-      gl.activeTexture(gl[`TEXTURE${i}`]);
-      const texture = gl.createTexture();
-      gl.bindTexture(gl.TEXTURE_2D, texture);
-      this.textures.push(texture);
-
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    }
-
-    gl.canvas.addEventListener("fillChunk", this.chunk.bind(this));
-    this.reset();
-  }
-
-  reset() {
-    const { gl, program } = this;
-    const { width, height } = gl.canvas;
-    gl.viewport(0, 0, width, height);
-    gl.clearColor(0.0, 0.0, 0.0, 0.0);
-    gl.clear(gl.COLOR_BUFFER_BIT);
-    gl.useProgram(program);
-    const transLoc = gl.getUniformLocation(program, "trans");
-    gl.uniform2f(transLoc, 1 / width, 1 / height);
   }
 
   /**
-   * fill WebGL chunk.
+   * find an idle work.
    *
-   * @param {CustomEvent<GLChunk>} event .
+   * @param {WorkerService[]} services .
+   * @returns {Worker} .
    */
-  chunk({ detail: { rect, align, data, plte } }) {
-    const { gl } = this;
-    const [x, y, w, h] = rect;
-    gl.bindVertexArray(this.vertexArray);
-
-    const indices = new Uint16Array([0, 1, 2, 0, 2, 3]);
-    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, indices, gl.STATIC_DRAW);
-    const points = new Float32Array([x, y + h, x, y, x + w, y, x + w, y + h]);
-    gl.bufferData(gl.ARRAY_BUFFER, points, gl.STATIC_DRAW);
-
-    gl.uniform2f(this.offsetLoc, x, y);
-
-    gl.bindTexture(gl.TEXTURE_2D, this.textures[0]);
-    // if ((align & 0b11) !== 0) gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
-    gl.texImage2D(
-      /* target */ gl.TEXTURE_2D,
-      /* level */ 0,
-      /* internalformat */ gl.R8UI,
-      /* width */ align,
-      /* height */ h,
-      /* border */ 0,
-      /* format */ gl.RED_INTEGER,
-      /* type */ gl.UNSIGNED_BYTE,
-      /* pixels */ data
-    );
-    gl.uniform1i(this.dataTexLoc, 0);
-
-    const colorsMap = new Uint8Array(plte.byteLength >> 1);
-    for (let i = 0; i < colorsMap.length; i++) {
-      // 0,1,2,3 = plte[0]; 4,5,6,7 = plte[2]; 8,9,11 = plte[4];
-      //   => 4N + k = plte[2N]; i = plte[i / 4 * 2]
-      const color = plte[(i >> 2) << 1];
-      const bit = ((3 - i) & 0b11) << 3;
-      colorsMap[i] = (color >>> bit) & 0xff;
+  static idle(services) {
+    let idle = services[0];
+    for (let i = 1; i < services.length; i++) {
+      const service = services[i];
+      if (service._taskCount < idle._taskCount) {
+        idle = service;
+      }
     }
-    gl.bindTexture(gl.TEXTURE_2D, this.textures[1]);
-    gl.texImage2D(
-      /* target */ gl.TEXTURE_2D,
-      /* level */ 0,
-      /* internalformat */ gl.RGBA,
-      /* width */ colorsMap.length >> 2,
-      /* height */ 1,
-      /* border */ 0,
-      /* format */ gl.RGBA,
-      /* type */ gl.UNSIGNED_BYTE,
-      /* pixels */ colorsMap
-    );
-    gl.uniform1i(this.colorsMapLoc, 1);
+    idle._taskCount++;
+    return idle.worker;
+  }
 
-    gl.drawElements(gl.TRIANGLES, indices.length, gl.UNSIGNED_SHORT, 0);
-    gl.bindVertexArray(null);
+  static _indexer = 0;
+  static workerUrl = new URL("./ma-pa-p-a.worker.js", import.meta.url);
+
+  constructor() {
+    this.id = WorkerService._indexer++;
+    const name = `MaPaPA-Worker#${this.id}`;
+    this.worker = new Worker(WorkerService.workerUrl, { name });
+  }
+
+  _taskCount = 0;
+
+  /** @param {import("./types").MsgHandlers} handlers . */
+  _handle(handlers) {
+    this.worker.addEventListener(
+      "message",
+      /** @param {MessageEvent<{type: import("./types").MsgType, resp?: {}, error?: object}>} event . */
+      ({ data: { type, resp, error } }) => {
+        this._taskCount--;
+        if (error) {
+          console.error(`${TAG} worker request failed, type: ${type}`, error);
+        } else {
+          handlers[type](resp);
+        }
+      }
+    );
+  }
+
+  _safelyTerminate() {
+    if (this._taskCount <= 0) {
+      this.worker.terminate();
+      console.debug(`${TAG} worker terminated, id: ${this.id}`);
+      return;
+    }
+    this.worker.addEventListener("message", () => {
+      setTimeout(() => {
+        if (this._taskCount > 0) return;
+        this.worker.terminate();
+        console.debug(`${TAG} worker safely exited, id: ${this.id}`);
+      }, 0);
+    });
   }
 }
 
 //#region utils
+
+/** @param {number} color . */
+function parseRGBA(color) {
+  let value = color >>> 0;
+  const a = value & 0xff;
+  value >>>= 8;
+  const b = value & 0xff;
+  value >>>= 8;
+  const g = value & 0xff;
+  value >>>= 8;
+  const r = value & 0xff;
+  return [r, g, b, a];
+}
 
 /**
  * export file.
@@ -373,12 +371,12 @@ function exportFile(blob, name) {
 /**
  * export image.
  *
- * @param {HTMLCanvasElement} $canvas .
+ * @param {HTMLCanvasElement} canvas .
  * @param {string} name .
  * @param {"png" | "webp"} [format="webp"]
  */
-function exportImage($canvas, name, format = "webp") {
-  $canvas.toBlob(
+function exportImage(canvas, name, format = "webp") {
+  canvas.toBlob(
     (blob) => exportFile(blob, `${name}.${format}`),
     `image/${format}`,
     1.0
@@ -414,31 +412,6 @@ function* chunkRects({ width, height }, chunkSize) {
 }
 
 /**
- * link WebGL shader program.
- *
- * @param {WebGL2RenderingContext} gl .
- * @param {WebGLProgram} program .
- * @param {{[name in "VERTEX_SHADER" | "FRAGMENT_SHADER"]: string}} codes .
- */
-function linkShaderProgram(gl, program, codes) {
-  for (const [name, code] of Object.entries(codes)) {
-    const shader = gl.createShader(gl[name]);
-    gl.shaderSource(shader, code);
-    gl.compileShader(shader);
-    if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
-      const message = gl.getShaderInfoLog(shader);
-      throw new Error(`compile shader script failed, message: ${message}`);
-    }
-    gl.attachShader(program, shader);
-  }
-  gl.linkProgram(program);
-  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
-    const message = gl.getProgramInfoLog(program);
-    throw new Error(`link shader program failed, message: ${message}`);
-  }
-}
-
-/**
  * listen drop upload
  * @param {HTMLElement} $target .
  * @param {(files: FileList) => void} upload .
@@ -466,22 +439,31 @@ function listenUpload($target, upload) {
   });
 }
 
-function paletteColor(index, color, count) {
+/**
+ * create palette color element.
+ *
+ * @param {number} index .
+ * @param {string} code .
+ * @param {Palette} palette .
+ * @returns {HTMLAnchorElement} .
+ */
+function paletteColor(index, code, { color, count }) {
   const $color = document.createElement("a");
-  $color.id = `color${color}`;
-  $color.href = "javascript:void(0);";
-  const num =
+  $color.id = `color${code}`;
+  $color.title = `${index}. ${code}: ${
     count < 1000
       ? `${count}`
       : count < 1000000
       ? `${(count / 1000).toFixed(2)}K`
-      : `${(count / 1000000).toFixed(2)}M`;
-  $color.title = `${index}. ${color}: ${num}`;
-  if (color === "#00000000") {
+      : `${(count / 1000000).toFixed(2)}M`
+  }`;
+  $color.innerHTML = `<span/>`;
+  if ((color & 0xff) < 0xff) {
     $color.classList.add("tp-grid");
-  } else {
-    $color.style.backgroundColor = color;
   }
+  const hex = `#${color.toString(16).padStart(8, "0")}`;
+  $color.style.setProperty("--color", hex);
+  $color.href = "javascript:void(0);";
   return $color;
 }
 
@@ -532,47 +514,62 @@ function createTitlebar(app) {
 }
 
 /**
- * create palettle.
+ * create palette.
  *
  * @param {App} app .
- * @returns palettle element
+ * @returns palette element
  */
-function createPalettle(app) {
+function createPalette(app) {
   const $panel = document.createElement("div");
-  $panel.id = "palettle";
+  $panel.id = "palette";
   $panel.innerHTML =
-    '<a id="color#00000000" href="javascript:void(0);" class="tp-grid" />';
+    '<a id="color#00000000" href="javascript:void(0);" class="tp-grid"><span/></a>';
   app.addEventListener("clear", () => {
     $panel.innerHTML =
-      '<a id="color#00000000" href="javascript:void(0);" class="tp-grid" />';
+      '<a id="color#00000000" href="javascript:void(0);" class="tp-grid"><span/></a>';
   });
   app.addEventListener(
     "updatePalette",
-    /** @param {CustomEvent<Map<number, number>>} event . */ (event) => {
+    /** @param {CustomEvent<{[code: string]: Palette}>} event . */ ({
+      detail: palettes,
+    }) => {
       $panel.innerHTML = "";
-      const colors = Array.from(event.detail.entries());
-      colors.sort(([_rgba1, count1], [_rgba2, count2]) =>
-        count1 < count2 ? 1 : count1 > count2 ? -1 : 0
+      const colors = Object.entries(palettes);
+      colors.sort(([_o1, { count: c1 }], [_o2, { count: c2 }]) =>
+        c1 < c2 ? 1 : c1 > c2 ? -1 : 0
       );
       for (let index = 0; index < colors.length; index++) {
-        const [rgba, count] = colors[index];
-        const color = `#${rgba.toString(16).padStart(8, "0")}`;
-        const $color = paletteColor(index, color, count);
+        const [code, palette] = colors[index];
+        const $color = paletteColor(index, code, palette);
         $panel.appendChild($color);
       }
     }
   );
+  $panel.addEventListener("click", ({ target: $color }) => {
+    if (!($color instanceof HTMLAnchorElement)) return;
+    if (!$color.id.startsWith("color")) return;
+    const code = $color.id.slice(5);
+    // const hex = $color.style.getPropertyValue("--color");
+    // const color = Number.parseInt(hex.slice(1), 16);
+
+    // TODO toggle disable
+    const disable = !$color.classList.contains("cross-out");
+    app.disableColor(code, disable);
+    app.flushDirty();
+    if (disable) $color.classList.add("cross-out");
+    else $color.classList.remove("cross-out");
+  });
   listenUpload($panel, app.handleUpload); // 防呆设计
   return $panel;
 }
 
 /**
- * create textures.
+ * create archives.
  *
  * @param {App} app .
- * @returns textures element
+ * @returns archives element
  */
-function createTextures(app) {
+function createArchives(app) {
   const $images = document.createElement("div");
   $images.id = "images";
   app.addEventListener("clear", () => {
@@ -580,13 +577,13 @@ function createTextures(app) {
   });
   app.addEventListener(
     "createImage",
-    /** @param {CustomEvent<Texture>} event . */ ({ detail: { $canvas } }) => {
-      $images.appendChild($canvas);
+    /** @param {CustomEvent<Archive>} event . */ ({ detail: { canvas } }) => {
+      $images.appendChild(canvas);
     }
   );
 
   const $panel = document.createElement("div");
-  $panel.id = "textures";
+  $panel.id = "archives";
   $panel.classList.add("tp-grid");
   $panel.appendChild($images);
   listenUpload($panel, app.handleUpload); // 防呆设计
@@ -645,8 +642,8 @@ export function render(app, root = ".mppa") {
   const $root =
     root instanceof HTMLElement ? root : document.querySelector(root);
   $root.appendChild(createTitlebar(app));
-  $root.appendChild(createPalettle(app));
-  $root.appendChild(createTextures(app));
+  $root.appendChild(createPalette(app));
+  $root.appendChild(createArchives(app));
 }
 
 //
