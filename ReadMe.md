@@ -1,7 +1,14 @@
 # MaPaPA
 
 > Magic Palette for Pixel Arts  
-> [中文](.docs/ReadMe-zh.md)
+> [中文 ReadMe](.docs/ReadMe-zh.md)
+
+## Try it online:
+
+- [Github Page](https://zhengxiaoyao0716.github.io/ma-pa-p-a/)
+
+- [With example image](https://zhengxiaoyao0716.github.io/ma-pa-p-a/?fetch=https://raw.githubusercontent.com/zhengxiaoyao0716/ma-pa-p-a/main/.docs/example.png)
+  > Thanks for [Analog studios](https://itch.io/c/1507436/fantasy-)
 
 ## Usage
 

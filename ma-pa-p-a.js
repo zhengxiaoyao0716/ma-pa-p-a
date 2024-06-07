@@ -186,24 +186,22 @@ export class App extends EventTarget {
     }
   }
 
-  /** @param {File} file . */
-  parseImageFile(file) {
-    if (file.size > this.imageLimit << 20) {
-      const size = (file.size / 1024).toFixed(2);
-      console.error(
-        `${TAG} file too large, size: ${size}KB, max: ${this.imageLimit}MB`
-      );
-      return;
-    }
-    if (file.name in this.archives) {
-      console.warn(`${TAG} duplicated file, name: ${file.name}`);
+  /**
+   * parse image blob.
+   *
+   * @param {string} name .
+   * @param {Blob} blob .
+   */
+  parseImageBlob(name, blob) {
+    if (name in this.archives) {
+      console.warn(`${TAG} duplicated image, name: ${name}`);
       return;
     }
     /** @type {Archive} */ const archive = {
       canvas: document.createElement("canvas"),
       chunks: [],
     };
-    archive.canvas.title = file.name;
+    archive.canvas.title = name;
     archive.canvas.classList.add("loading");
 
     const $image = new Image();
@@ -212,10 +210,45 @@ export class App extends EventTarget {
       archive.canvas.classList.remove("loading");
       URL.revokeObjectURL($image.src);
     });
-    $image.src = URL.createObjectURL(file);
+    $image.src = URL.createObjectURL(blob);
 
-    this.archives[file.name] = archive;
+    this.archives[name] = archive;
     this.dispatchEvent(new CustomEvent("createImage", { detail: archive }));
+  }
+
+  /**
+   * parse blob.
+   *
+   * @param {string} path .
+   * @param {Blob} blob .
+   */
+  parseBlob(path, blob) {
+    if (blob.size > this.imageLimit << 20) {
+      const size = (blob.size / 1024).toFixed(2);
+      console.error(
+        `${TAG} file too large, size: ${size}KB, max: ${this.imageLimit}MB`
+      );
+      return;
+    }
+    const index = path.lastIndexOf(".");
+    const name = path.slice(0, index);
+    switch (path.slice(1 + index)) {
+      case "png":
+      case "gif":
+      case "webp": {
+        this.parseImageBlob(name, blob);
+        break;
+      }
+      case "mppa": {
+        const url = URL.createObjectURL(blob);
+        this.request("parseGzip", { url, name });
+        break;
+      }
+      default: {
+        console.warn(`${TAG} unknown type, name: ${name}`);
+        break;
+      }
+    }
   }
 
   clearCache() {
@@ -228,25 +261,7 @@ export class App extends EventTarget {
   handleUpload = (sources) => {
     // this.clearCache();
     for (const source of sources) {
-      const index = source.name.lastIndexOf(".");
-      switch (source.name.slice(1 + index)) {
-        case "png":
-        case "webp": {
-          this.parseImageFile(source);
-          break;
-        }
-        case "mppa": {
-          this.request("parseGzip", {
-            url: URL.createObjectURL(source),
-            name: source.name.slice(0, index),
-          });
-          break;
-        }
-        default: {
-          console.warn(`${TAG} unknown file type, name: ${source.name}`);
-          break;
-        }
-      }
+      this.parseBlob(source.name, source);
     }
     this.dispatchEvent(new CustomEvent("uploaded", { detail: sources }));
   };
@@ -437,6 +452,27 @@ function listenUpload($target, upload) {
     event.currentTarget.classList.remove("dragover");
     upload(event.dataTransfer.files);
   });
+}
+
+/**
+ * fetch url and parse the content.
+ *
+ * @param {App} app .
+ * @param {string} query .
+ */
+function fetchAndParse(app, query) {
+  const params = new URLSearchParams(window.location.search);
+  for (const value of params.getAll(query)) {
+    const url = new URL(window.decodeURI(value), import.meta.url);
+    console.debug(`${TAG} auto fetch and parse, url: ${url}`);
+    fetch(url, { mode: "cors" }).then(async (resp) => {
+      if (!resp.ok) return;
+      const blob = resp.blob();
+      const index = resp.url.lastIndexOf("/");
+      const name = resp.url.slice(1 + index);
+      app.parseBlob(name, await blob);
+    });
+  }
 }
 
 /**
@@ -637,13 +673,15 @@ async function fetchStyle(url) {
  *
  * @param {App} app .
  * @param {HTMLElement | string} root root element or it's selector
+ * @param {string} [query="parse"] uri query keyword for auto upload and parse file
  */
-export function render(app, root = ".mppa") {
+export function render(app, root = ".mppa", query = "fetch") {
   const $root =
     root instanceof HTMLElement ? root : document.querySelector(root);
   $root.appendChild(createTitlebar(app));
   $root.appendChild(createPalette(app));
   $root.appendChild(createArchives(app));
+  if (query) fetchAndParse(app, query);
 }
 
 //
