@@ -14,6 +14,8 @@ export interface Palette {
       offset: number;
     }[];
   };
+  dirty?: number;
+  split?: string[];
 }
 
 export interface Archive {

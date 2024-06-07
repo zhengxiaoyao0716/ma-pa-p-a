@@ -9,7 +9,15 @@
       "type": "node",
       "request": "launch",
       "runtimeExecutable": "pnpm",
-      "args": ["dlx", "vite", ".", "--host", "0.0.0.0", "--open"]
+      "args": [
+        "dlx",
+        "vite",
+        ".",
+        "--host",
+        "0.0.0.0",
+        "--open",
+        "http://localhost:5173/?fetch=https://raw.githubusercontent.com/zhengxiaoyao0716/ma-pa-p-a/main/.docs/example.png"
+      ]
     }
   ]
 }

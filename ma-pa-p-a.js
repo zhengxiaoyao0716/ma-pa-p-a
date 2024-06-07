@@ -19,7 +19,7 @@ export class App extends EventTarget {
 
   constructor({
     imageLimit = 16, // 16MB
-    chunkSize = 1 << 18, // 512 * 512
+    chunkSize = 1 << 20, // 1024 * 1024
     workersNum = 8,
   } = {}) {
     super();
@@ -31,8 +31,6 @@ export class App extends EventTarget {
   //#region worker pools
 
   /** @type {WorkerService[]} */ workers = [];
-
-  //
 
   get workersNum() {
     return this.workers.length;
@@ -50,7 +48,6 @@ export class App extends EventTarget {
   /** @type {import("./types").MsgHandlers} */
   handlers = {
     parseGzip: ({ name, buffer }) => {
-      // TODO
       console.log("TODO on parsed gzip", name, buffer);
     },
 
@@ -71,14 +68,7 @@ export class App extends EventTarget {
       for (let i = 0; i < colors.byteLength; i += 4) {
         const color = colors.getUint32(i);
         const count = counter.getUint32(i, true);
-        const code = color.toString(16).toUpperCase();
-        const palette =
-          this.palettes[code] ??
-          (this.palettes[code] = {
-            color,
-            count: 0,
-            refer: {},
-          });
+        const palette = this.computePalette(color);
         palette.count += count;
         const refer = palette.refer[arch] ?? (palette.refer[arch] = []);
         refer.push({ chunk, offset: i });
@@ -125,17 +115,63 @@ export class App extends EventTarget {
       }
     }
     this.dirtyChunks = {};
+    this.dispatchEvent(
+      new CustomEvent("updatePalette", { detail: this.palettes })
+    );
+  }
+
+  /** @param {number} color . */
+  computePalette(color) {
+    const code = color.toString(16).toUpperCase();
+    const palette =
+      this.palettes[code] ??
+      (this.palettes[code] = {
+        color,
+        count: 0,
+        refer: {},
+      });
+    if (palette.dirty === undefined) return palette;
+
+    // split color palette
+    const split = palette.split ?? (palette.split = []);
+    for (const code of split) {
+      const palette = this.palettes[code];
+      if (palette.dirty === undefined) return palette;
+    }
+    const next = `${code}_${1 + split.length}`;
+    split.push(next);
+    return (this.palettes[next] = {
+      color,
+      count: 0,
+      refer: {},
+    });
+  }
+
+  /** @param {string} code . */
+  splitColor(code) {
+    if (code[8] === "_") {
+      this.splitColor(code.slice(0, 8));
+      return;
+    }
+    const palette = this.palettes[code];
+    if (palette == null) return;
+    console.log("TODO split color", code, palette);
   }
 
   /**
-   * toggle color disable status.
+   * update color.
    *
    * @param {string} code .
    * @param {number} color .
    */
-  replaceColor(code, color) {
+  updateColor(code, color) {
     const palette = this.palettes[code];
     if (palette == null) return;
+    const dirty = color === palette.color ? undefined : color;
+    if (dirty === palette.dirty) return;
+    palette.dirty = dirty;
+    const rgba = parseRGBA(color);
+
     for (const [arch, refer] of Object.entries(palette.refer)) {
       const chunks =
         this.dirtyChunks[arch] ?? (this.dirtyChunks[arch] = new Set());
@@ -145,46 +181,12 @@ export class App extends EventTarget {
         if (texture == null) continue;
         chunks.add(chunk);
         const { plte } = texture;
-        plte.set(parseRGBA(color), offset);
+        plte.set(rgba, offset);
       }
     }
   }
 
-  /**
-   * toggle color disable status.
-   *
-   * @param {string} code .
-   * @param {boolean} disable .
-   */
-  disableColor(code, disable) {
-    const palette = this.palettes[code];
-    if (palette == null) return;
-    this.replaceColor(code, disable ? 0x00000000 : palette.color);
-  }
-
   //#endregion
-
-  /**
-   * render image
-   * @param {Archive} archive .
-   * @param {HTMLImageElement} $image .
-   */
-  parseImageData({ canvas, chunks }, $image) {
-    canvas.width = $image.width;
-    canvas.height = $image.height;
-    const arch = canvas.title;
-    for (const rect of chunkRects($image, this.chunkSize)) {
-      const id = chunks.length;
-      chunks.push({ rect });
-      window.createImageBitmap($image, ...rect).then((source) => {
-        this.request("parseImage", {
-          arch,
-          chunk: id,
-          trans: [source],
-        });
-      });
-    }
-  }
 
   /**
    * parse image blob.
@@ -197,23 +199,38 @@ export class App extends EventTarget {
       console.warn(`${TAG} duplicated image, name: ${name}`);
       return;
     }
-    /** @type {Archive} */ const archive = {
+    const bitmap = window.createImageBitmap(blob);
+    /** @type {Archive} */
+    const archive = {
       canvas: document.createElement("canvas"),
       chunks: [],
     };
     archive.canvas.title = name;
     archive.canvas.classList.add("loading");
-
-    const $image = new Image();
-    $image.addEventListener("load", (event) => {
-      this.parseImageData(archive, event.currentTarget);
-      archive.canvas.classList.remove("loading");
-      URL.revokeObjectURL($image.src);
-    });
-    $image.src = URL.createObjectURL(blob);
-
     this.archives[name] = archive;
     this.dispatchEvent(new CustomEvent("createImage", { detail: archive }));
+
+    bitmap.then((bitmap) => {
+      archive.canvas.width = bitmap.width;
+      archive.canvas.height = bitmap.height;
+      archive.canvas.classList.remove("loading");
+
+      const arch = archive.canvas.title;
+      for (const rect of chunkRects(bitmap, this.chunkSize)) {
+        const source = window.createImageBitmap(bitmap, ...rect);
+        const id = archive.chunks.length;
+        archive.chunks.push({ rect });
+        source.then((source) => {
+          this.request("parseImage", {
+            arch,
+            chunk: id,
+            trans: [source],
+          });
+          source.close();
+        });
+      }
+      bitmap.close();
+    });
   }
 
   /**
@@ -403,7 +420,7 @@ function exportImage(canvas, name, format = "webp") {
  *
  * @param {{width: number, height: number}} imageSize .
  * @param {number} chunkSize .
- * @returns {Iterable<[x: number, y: number, w: number, h: number]>} chunk rects
+ * @returns {Iterable<import("./types").Rect>} chunk rects
  */
 function* chunkRects({ width, height }, chunkSize) {
   if (width > height) {
@@ -483,10 +500,12 @@ function fetchAndParse(app, query) {
  * @param {Palette} palette .
  * @returns {HTMLAnchorElement} .
  */
-function paletteColor(index, code, { color, count }) {
+function paletteColor(index, code, { color, count, dirty, split }) {
   const $color = document.createElement("a");
   $color.id = `color${code}`;
-  $color.title = `${index}. ${code}: ${
+  $color.title = `${index}. ${code}${
+    split === undefined || code[8] === "_" ? "" : "_0"
+  }: ${
     count < 1000
       ? `${count}`
       : count < 1000000
@@ -494,13 +513,69 @@ function paletteColor(index, code, { color, count }) {
       : `${(count / 1000000).toFixed(2)}M`
   }`;
   $color.innerHTML = `<span/>`;
-  if ((color & 0xff) < 0xff) {
+  const rgba = dirty || color;
+  if ((rgba & 0xff) < 0xff) {
     $color.classList.add("tp-grid");
   }
-  const hex = `#${color.toString(16).padStart(8, "0")}`;
+  const hex = `#${rgba.toString(16).padStart(8, "0")}`;
   $color.style.setProperty("--color", hex);
+  const disable = dirty === 0;
+  if (disable) $color.classList.add("cross-out");
+  else $color.classList.remove("cross-out");
   $color.href = "javascript:void(0);";
   return $color;
+}
+
+/**
+ * build color dialog html.
+ *
+ * @param {string} hex .
+ * @param {number} color .
+ * @param {string} title .
+ * @param {boolean} disable .
+ * @returns .
+ */
+function colorDialogHTML(hex, color, title, disable) {
+  const rgba = parseRGBA(color);
+  const rgbHex = hex.slice(0, 7);
+  return `
+    <div>
+      <span class="color tp-grid" style="--color: ${hex};"></span>
+      <span class="props">
+        <span>${title}</span>
+        <small>rgba(${rgba.join(", ")})</small>
+      </span>
+    </div>
+    <div id="colorPicker">
+      <label id="rgb">
+        <input type="color" value="${rgbHex}" />
+        <pre>${rgbHex}</pre>
+      </label>
+      <label id="alpha">
+        <input type="range" min="0" max="255" value="${rgba[3]}" />
+        <pre>A: ${rgba[3]}</pre>
+      </label>
+    </div>
+    <a id="submit" href="javascript:void(0);">
+      <span>Submit</span>
+    </a>
+    <a id="toggle" href="javascript:void(0);">
+      <span>Toggle</span>
+      <small>Shift+Click</small>
+    </a>
+    <a id="focus" href="javascript:void(0);">
+      <span>Focus</span>
+      <small>Ctrl+Click</small>
+    </a>
+    <a id="exclude" href="javascript:void(0);">
+      <span>Exclude</span>
+      <small>Alt+Click</small>
+    </a>
+    <a id="split" href="javascript:void(0);">
+      <span>Split</span>
+      <small>Right Click</small>
+    </a>
+  `;
 }
 
 //#endregion
@@ -549,6 +624,9 @@ function createTitlebar(app) {
   return $label;
 }
 
+const emptyColorHtml =
+  '<a id="emptyColor" href="javascript:void(0);" class="tp-grid"><span/></a>';
+
 /**
  * create palette.
  *
@@ -556,46 +634,129 @@ function createTitlebar(app) {
  * @returns palette element
  */
 function createPalette(app) {
-  const $panel = document.createElement("div");
-  $panel.id = "palette";
-  $panel.innerHTML =
-    '<a id="color#00000000" href="javascript:void(0);" class="tp-grid"><span/></a>';
+  const $colors = document.createElement("div");
+  $colors.classList.add("colors");
   app.addEventListener("clear", () => {
-    $panel.innerHTML =
-      '<a id="color#00000000" href="javascript:void(0);" class="tp-grid"><span/></a>';
+    $colors.innerHTML = emptyColorHtml;
   });
   app.addEventListener(
     "updatePalette",
     /** @param {CustomEvent<{[code: string]: Palette}>} event . */ ({
       detail: palettes,
     }) => {
-      $panel.innerHTML = "";
+      $colors.innerHTML = "";
       const colors = Object.entries(palettes);
       colors.sort(([_o1, { count: c1 }], [_o2, { count: c2 }]) =>
         c1 < c2 ? 1 : c1 > c2 ? -1 : 0
       );
-      for (let index = 0; index < colors.length; index++) {
-        const [code, palette] = colors[index];
-        const $color = paletteColor(index, code, palette);
-        $panel.appendChild($color);
+      let index = 0;
+      for (const [code, palette] of colors) {
+        if (code[8] === "_") continue;
+        const $color = paletteColor(index++, code, palette);
+        $colors.appendChild($color);
+        if (palette.split === undefined) continue;
+        for (const code of palette.split) {
+          const palette = palettes[code];
+          const $color = paletteColor(index++, code, palette);
+          $colors.appendChild($color);
+        }
       }
     }
   );
-  $panel.addEventListener("click", ({ target: $color }) => {
+
+  const $dialog = document.createElement("div");
+  $dialog.classList.add("dialog");
+  function closeDialog() {
+    $dialog.classList.remove("show");
+    $dialog.innerHTML = "";
+  }
+  $dialog.addEventListener("click", ({ target, currentTarget }) => {
+    if (target === currentTarget) closeDialog();
+  });
+  $colors.addEventListener(
+    "click",
+    ({ target: $color, ctrlKey, shiftKey, altKey }) => {
+      if (!($color instanceof HTMLAnchorElement)) return;
+      if (!$color.id.startsWith("color")) return;
+      const code = $color.id.slice(5);
+      const hex = $color.style.getPropertyValue("--color");
+      const color = Number.parseInt(hex.slice(1), 16);
+
+      function toggleDisable(disable) {
+        app.updateColor(code, disable ? 0x00000000 : color);
+        app.flushDirty();
+      }
+      function batchDisable(disable) {
+        for (const $color of $colors.children) {
+          if (!($color instanceof HTMLAnchorElement)) continue;
+          if (!$color.id.startsWith("color")) continue;
+          const code = $color.id.slice(5);
+          const hex = $color.style.getPropertyValue("--color");
+          const color = Number.parseInt(hex.slice(1), 16);
+          app.updateColor(code, disable ? 0x00000000 : color);
+        }
+        app.updateColor(code, disable ? color : 0x00000000);
+        app.flushDirty();
+      }
+      const disable = $color.classList.contains("cross-out");
+      if (shiftKey) return toggleDisable(!disable);
+      if (ctrlKey) return batchDisable(true);
+      if (altKey) return batchDisable(false);
+
+      $dialog.innerHTML = colorDialogHTML(hex, color, $color.title, disable);
+      $dialog.classList.add("show");
+      $dialog.querySelector("#toggle").addEventListener("click", () => {
+        closeDialog();
+        toggleDisable(!disable);
+      });
+      $dialog.querySelector("#focus").addEventListener("click", () => {
+        closeDialog();
+        batchDisable(true);
+      });
+      $dialog.querySelector("#exclude").addEventListener("click", () => {
+        closeDialog();
+        batchDisable(false);
+      });
+      $dialog.querySelector("#split").addEventListener("click", () => {
+        closeDialog();
+        app.splitColor(code);
+      });
+      const $rgb = $dialog.querySelector("label#rgb>input");
+      const $alpha = $dialog.querySelector("label#alpha>input");
+      $rgb.addEventListener("input", (event) => {
+        const value = event.currentTarget.value;
+        $dialog.querySelector("label#rgb>pre").innerHTML = value;
+      });
+      $alpha.addEventListener("input", (event) => {
+        const value = event.currentTarget.value;
+        const text = `A: ${value.padStart(3, " ")}`;
+        $dialog.querySelector("label#alpha>pre").innerHTML = text;
+      });
+      $dialog.querySelector("#submit").addEventListener("click", () => {
+        closeDialog();
+        const rgb = Number.parseInt($rgb.value.slice(1), 16);
+        const alpha = Number.parseInt($alpha.value);
+        const color = rgb * 256 + alpha;
+        app.updateColor(code, color);
+        app.flushDirty();
+      });
+    }
+  );
+  $colors.addEventListener("contextmenu", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const { target: $color } = event;
     if (!($color instanceof HTMLAnchorElement)) return;
     if (!$color.id.startsWith("color")) return;
     const code = $color.id.slice(5);
-    // const hex = $color.style.getPropertyValue("--color");
-    // const color = Number.parseInt(hex.slice(1), 16);
-
-    // TODO toggle disable
-    const disable = !$color.classList.contains("cross-out");
-    app.disableColor(code, disable);
-    app.flushDirty();
-    if (disable) $color.classList.add("cross-out");
-    else $color.classList.remove("cross-out");
+    app.splitColor(code);
   });
-  listenUpload($panel, app.handleUpload); // 防呆设计
+
+  const $panel = document.createElement("div");
+  $panel.id = "palette";
+  $panel.appendChild($colors);
+  $panel.appendChild($dialog);
+  listenUpload($panel, app.handleUpload);
   return $panel;
 }
 
@@ -622,7 +783,7 @@ function createArchives(app) {
   $panel.id = "archives";
   $panel.classList.add("tp-grid");
   $panel.appendChild($images);
-  listenUpload($panel, app.handleUpload); // 防呆设计
+  listenUpload($panel, app.handleUpload);
   return $panel;
 }
 
