@@ -6,6 +6,7 @@ export interface Texture {
 }
 
 export interface Palette {
+  code: string;
   color: number;
   count: number;
   refer: {
@@ -15,11 +16,12 @@ export interface Palette {
     }[];
   };
   dirty?: number;
-  split?: string[];
 }
 
 export interface Archive {
-  readonly canvas: HTMLCanvasElement & { /*arch*/ title: string };
+  readonly ctx: CanvasRenderingContext2D & {
+    canvas: { /*arch*/ title: string };
+  };
   readonly chunks: { readonly rect: Rect; readonly texture?: Texture }[];
 }
 
@@ -36,6 +38,7 @@ export interface Msg {
       trans: [buffer: ArrayBuffer];
     };
   };
+
   parseImage: {
     req: {
       arch: string;
@@ -65,6 +68,26 @@ export interface Msg {
       arch: string;
       chunk: number;
       trans: [output: ImageBitmap, plte: ArrayBuffer, data: ArrayBuffer];
+    };
+  };
+
+  dumpPalettes: {
+    req: {
+      name: string;
+      plte: Uint8ClampedArray;
+      width: number;
+      height: number;
+      trans: [plte: ArrayBuffer];
+    };
+    resp: {
+      name: string;
+      url: string;
+    };
+  };
+  dumpArchives: {
+    req: {
+      name: string;
+      data: Uint8ClampedArray;
     };
   };
 }

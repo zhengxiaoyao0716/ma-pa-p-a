@@ -3,8 +3,6 @@
  * https://github.com/zhengxiaoyao0716/ma-pa-p-a
  */
 
-const TAG = "[ma-pa-p-a]";
-
 /**
  * @typedef {import("./types").Palette} Palette
  * @typedef {import("./types").Archive} Archive
@@ -12,10 +10,14 @@ const TAG = "[ma-pa-p-a]";
 
 /** Magic Palette for Pixel Arts Application */
 export class App extends EventTarget {
-  /** @type {{[code: string]: Palette}} */
+  /** @type {{[code: string]: Palette | { count: number, split: Palette[] }}} */
   palettes = {};
+  paletteNum = 0;
   /** @type {{[name: string]: Archive}} */
   archives = {};
+  archiveNum = 0;
+
+  dialog = new Dialog();
 
   constructor({
     imageLimit = 16, // 16MB
@@ -36,7 +38,7 @@ export class App extends EventTarget {
     return this.workers.length;
   }
   set workersNum(num) {
-    WorkerService.resize(this.workers, num, this.handlers);
+    WorkerService.resize(this, num);
   }
 
   /** @type {import("./types").MsgRequest} */
@@ -48,18 +50,19 @@ export class App extends EventTarget {
   /** @type {import("./types").MsgHandlers} */
   handlers = {
     parseGzip: ({ name, buffer }) => {
-      console.log("TODO on parsed gzip", name, buffer);
+      this.log("info", "TODO on parsed gzip", name, buffer);
     },
 
     parseImage: ({ arch, chunk, data, plte, trans: [output, count] }) => {
       const colorNum = plte.byteLength >> 2;
       if (colorNum > 256) {
-        console.error(
-          `${TAG} too many colors, name: ${arch}, limit: ${256}, count: ${colorNum}+`
+        this.log(
+          "error",
+          `too many colors, name: ${arch}, limit: ${256}, count: ${colorNum}+`
         );
         return;
       }
-      const { canvas, chunks } = this.archives[arch];
+      const { ctx, chunks } = this.archives[arch];
       const { rect } = chunks[chunk];
       chunks[chunk] = { rect, texture: { data, plte } };
 
@@ -73,26 +76,44 @@ export class App extends EventTarget {
         const refer = palette.refer[arch] ?? (palette.refer[arch] = []);
         refer.push({ chunk, offset: i });
       }
-      this.dispatchEvent(
-        new CustomEvent("updatePalette", { detail: this.palettes })
-      );
-      const ctx = canvas.getContext("2d");
+      const detail = this.iterPalettes(this.sortedPalettes());
+      this.dispatchEvent(new CustomEvent("updatePalette", { detail }));
       ctx.drawImage(output, ...rect);
     },
 
     updateChunk: ({ arch, chunk, data, plte, trans: [output] }) => {
-      const { canvas, chunks } = this.archives[arch];
+      const { ctx, chunks } = this.archives[arch];
       const { rect } = chunks[chunk];
       chunks[chunk] = { rect, texture: { data, plte } };
-      const ctx = canvas.getContext("2d");
       ctx.clearRect(...rect);
       ctx.drawImage(output, ...rect);
+    },
+
+    dumpPalettes: ({ name, url }) => {
+      dumpFile(name, url);
+      setTimeout(() => URL.revokeObjectURL(url), 0);
     },
   };
 
   //#endregion
 
   //#region palette operate
+
+  sortedPalettes() {
+    return Object.values(this.palettes).sort(
+      ({ count: count1 }, { count: count2 }) => {
+        return count1 > count2 ? -1 : count1 < count2 ? 1 : 0;
+      }
+    );
+  }
+
+  /** @param {(Palette | { count: number, split: Palette[] })[]} palettes . */
+  *iterPalettes(palettes) {
+    for (const palette of palettes) {
+      if ("code" in palette) yield palette;
+      else yield* palette.split;
+    }
+  }
 
   /** @type {{[arch: string]: Set<number> }} */ dirtyChunks = {};
 
@@ -115,47 +136,78 @@ export class App extends EventTarget {
       }
     }
     this.dirtyChunks = {};
-    this.dispatchEvent(
-      new CustomEvent("updatePalette", { detail: this.palettes })
-    );
+    const detail = this.iterPalettes(this.sortedPalettes());
+    this.dispatchEvent(new CustomEvent("updatePalette", { detail }));
+  }
+
+  /**
+   * get palette.
+   *
+   * @param {string} code .
+   * @returns {Palette | undefined}
+   */
+  getPalette(code) {
+    if (code.length === 8) return this.palettes[code];
+    /** @type {{count: number, split: Palette[]}} */
+    const parent = this.palettes[code.slice(0, 8)];
+    const i = Number.parseInt(code.slice(8), 16);
+    return parent.split[i];
   }
 
   /** @param {number} color . */
   computePalette(color) {
-    const code = color.toString(16).toUpperCase();
-    const palette =
-      this.palettes[code] ??
-      (this.palettes[code] = {
+    const code = color.toString(16).toUpperCase().padStart(8, "0");
+    const palette = this.palettes[code];
+    if (palette == null) {
+      this.paletteNum++;
+      return (this.palettes[code] = {
+        code,
         color,
         count: 0,
         refer: {},
       });
-    if (palette.dirty === undefined) return palette;
-
-    // split color palette
-    const split = palette.split ?? (palette.split = []);
-    for (const code of split) {
-      const palette = this.palettes[code];
+    }
+    if ("code" in palette) {
+      if (palette.dirty === undefined) return palette;
+      palette.code = `${code}00`;
+      this.palettes[code] = { count: palette.count, split: [palette] };
+    }
+    /** @type {{count: number, split: Palette[]}} */
+    const parent = this.palettes[code];
+    for (const palette of parent.split) {
       if (palette.dirty === undefined) return palette;
     }
-    const next = `${code}_${1 + split.length}`;
-    split.push(next);
-    return (this.palettes[next] = {
+    this.paletteNum++;
+    let count = 0;
+    const children = {
+      code: `${code}${parent.split.length
+        .toString(16)
+        .toUpperCase()
+        .padStart(2, "0")}`,
       color,
-      count: 0,
+      get count() {
+        return count;
+      },
+      set count(value) {
+        count = value;
+        parent.count += value;
+      },
       refer: {},
-    });
+    };
+    parent.split.push(children);
+    return children;
   }
 
   /** @param {string} code . */
   splitColor(code) {
-    if (code[8] === "_") {
+    if (code.length > 8) {
       this.splitColor(code.slice(0, 8));
       return;
     }
+    /** @type {Palette} */
     const palette = this.palettes[code];
     if (palette == null) return;
-    console.log("TODO split color", code, palette);
+    this.log("info", "TODO split color", code, palette);
   }
 
   /**
@@ -165,7 +217,7 @@ export class App extends EventTarget {
    * @param {number} color .
    */
   updateColor(code, color) {
-    const palette = this.palettes[code];
+    const palette = this.getPalette(code);
     if (palette == null) return;
     const dirty = color === palette.color ? undefined : color;
     if (dirty === palette.dirty) return;
@@ -196,26 +248,27 @@ export class App extends EventTarget {
    */
   parseImageBlob(name, blob) {
     if (name in this.archives) {
-      console.warn(`${TAG} duplicated image, name: ${name}`);
+      this.log("warn", `duplicated image, name: ${name}`);
       return;
     }
     const bitmap = window.createImageBitmap(blob);
+
+    const canvas = document.createElement("canvas");
+    canvas.title = name;
+    canvas.classList.add("loading");
     /** @type {Archive} */
-    const archive = {
-      canvas: document.createElement("canvas"),
-      chunks: [],
-    };
-    archive.canvas.title = name;
-    archive.canvas.classList.add("loading");
+    const archive = { ctx: canvas.getContext("2d"), chunks: [] };
+    this.archiveNum++;
     this.archives[name] = archive;
     this.dispatchEvent(new CustomEvent("createImage", { detail: archive }));
 
     bitmap.then((bitmap) => {
-      archive.canvas.width = bitmap.width;
-      archive.canvas.height = bitmap.height;
-      archive.canvas.classList.remove("loading");
+      const { canvas } = archive.ctx;
+      canvas.width = bitmap.width;
+      canvas.height = bitmap.height;
+      canvas.classList.remove("loading");
 
-      const arch = archive.canvas.title;
+      const arch = canvas.title;
       for (const rect of chunkRects(bitmap, this.chunkSize)) {
         const source = window.createImageBitmap(bitmap, ...rect);
         const id = archive.chunks.length;
@@ -236,20 +289,20 @@ export class App extends EventTarget {
   /**
    * parse blob.
    *
-   * @param {string} path .
+   * @param {string} name .
    * @param {Blob} blob .
    */
-  parseBlob(path, blob) {
+  parseBlob(name, blob) {
     if (blob.size > this.imageLimit << 20) {
       const size = (blob.size / 1024).toFixed(2);
-      console.error(
-        `${TAG} file too large, size: ${size}KB, max: ${this.imageLimit}MB`
+      this.log(
+        "error",
+        `file too large, size: ${size}KB, max: ${this.imageLimit}MB`
       );
       return;
     }
-    const index = path.lastIndexOf(".");
-    const name = path.slice(0, index);
-    switch (path.slice(1 + index)) {
+    const index = name.lastIndexOf(".");
+    switch (name.slice(1 + index)) {
       case "png":
       case "gif":
       case "webp": {
@@ -262,7 +315,7 @@ export class App extends EventTarget {
         break;
       }
       default: {
-        console.warn(`${TAG} unknown type, name: ${name}`);
+        this.log("warn", `unknown type, name: ${name}`);
         break;
       }
     }
@@ -270,18 +323,66 @@ export class App extends EventTarget {
 
   clearCache() {
     this.palettes = {};
+    this.thiNum = 0;
     this.archives = {};
+    this.thiNum = 0;
     this.dispatchEvent(new CustomEvent("clear"));
   }
 
   /** @param {FileList} sources . */
-  handleUpload = (sources) => {
+  handleUpload(sources) {
     // this.clearCache();
     for (const source of sources) {
       this.parseBlob(source.name, source);
     }
     this.dispatchEvent(new CustomEvent("uploaded", { detail: sources }));
-  };
+  }
+
+  /**
+   * log message.
+   *
+   * @typedef {"error" | "warn" | "info" | "debug"} LogLevel .
+   *
+   * @param {LogLevel} level .
+   * @param {string} message .
+   * @param {...object[]} [payload] .
+   */
+  log(level, message, ...varargs) {
+    console[level](`[ma-pa-p-a] ${message}`, ...varargs);
+    this.dispatchEvent(new CustomEvent("log", { detail: { level, message } }));
+  }
+
+  dump() {
+    const layouts = [,];
+    const palettes = Array.from(this.iterPalettes(this.sortedPalettes()));
+    const colors = palettes.flatMap(({ color }) => parseRGBA(color));
+    const plte = new Uint8ClampedArray(colors.length * layouts.length);
+    let offset = 0;
+    for (const _layout of layouts) {
+      for (const color of colors) {
+        plte[offset++] = color;
+      }
+    }
+    const salt = (new Date().getTime() & 0xffffff)
+      .toString(16)
+      .padStart(6, "0");
+    const width = palettes.length;
+    const height = layouts.length;
+    return {
+      palettes: () => {
+        this.request("dumpPalettes", {
+          name: `mppa-${salt}_${width}x${height}.plte`,
+          plte,
+          width,
+          height,
+          trans: [plte.buffer],
+        });
+      },
+      archives: () => {
+        // TODO
+      },
+    };
+  }
 }
 
 //
@@ -290,23 +391,22 @@ class WorkerService {
   /**
    * resize worker services.
    *
-   * @param {WorkerService[]} services .
+   * @param {App} app .
    * @param {number} num .
-   * @param {import("./types").MsgHandlers} handlers .
    */
-  static resize(services, num, handlers) {
-    const { length } = services;
+  static resize(app, num) {
+    const { length } = app.workers;
     if (num <= length) {
       for (let i = num; i < length; i++) {
-        const service = services.pop();
-        service._safelyTerminate();
+        const service = app.workers.pop();
+        service._safelyTerminate(app);
       }
       return;
     }
     for (let i = length; i < num; i++) {
       const service = new WorkerService();
-      service._handle(handlers);
-      services.push(service);
+      service._handle(app);
+      app.workers.push(service);
     }
   }
 
@@ -339,35 +439,215 @@ class WorkerService {
 
   _taskCount = 0;
 
-  /** @param {import("./types").MsgHandlers} handlers . */
-  _handle(handlers) {
+  /** @param {App} app . */
+  _handle(app) {
     this.worker.addEventListener(
       "message",
       /** @param {MessageEvent<{type: import("./types").MsgType, resp?: {}, error?: object}>} event . */
       ({ data: { type, resp, error } }) => {
         this._taskCount--;
         if (error) {
-          console.error(`${TAG} worker request failed, type: ${type}`, error);
+          app.log("error", `worker request failed, type: ${type}`, error);
         } else {
-          handlers[type](resp);
+          app.handlers[type](resp);
         }
       }
     );
   }
 
-  _safelyTerminate() {
+  /** @param {App} app . */
+  _safelyTerminate(app) {
     if (this._taskCount <= 0) {
       this.worker.terminate();
-      console.debug(`${TAG} worker terminated, id: ${this.id}`);
+      app.log("debug", `worker terminated, id: ${this.id}`);
       return;
     }
     this.worker.addEventListener("message", () => {
       setTimeout(() => {
         if (this._taskCount > 0) return;
         this.worker.terminate();
-        console.debug(`${TAG} worker safely exited, id: ${this.id}`);
+        app.log("debug", `worker safely exited, id: ${this.id}`);
       }, 0);
     });
+  }
+}
+
+class Dialog {
+  /** @type {(($dialog: HTMLDivElement, event: MouseEvent) => void)[] | undefined} */
+  _actions = undefined;
+
+  constructor() {
+    this.$dialog = document.createElement("div");
+    this.$dialog.classList.add("dialog");
+    this.$dialog.addEventListener("click", (event) => {
+      if (this._actions == null) return;
+      if (event.target === event.currentTarget) return;
+      if (!(event.target instanceof HTMLElement)) return;
+      if (!event.target.id.startsWith("act")) return;
+      event.preventDefault();
+      event.stopPropagation();
+
+      const index = Number.parseInt(event.target.id.slice(3));
+      const action = this._actions[index];
+      if (action != null) {
+        action(event.currentTarget, event);
+        this.hide();
+      }
+    });
+    this.$dialog.addEventListener("contextmenu", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+    });
+  }
+
+  /**
+   * @typedef {{
+   *   html: () => string,
+   *   show: undefined | ($dialog: HTMLDivElement) => void,
+   *   actions: undefined | (($dialog: HTMLDivElement, event: MouseEvent) => void)[],
+   * }} Content
+   */
+
+  /**
+   * show dialog.
+   *
+   * @param {string[]} items
+   * @param {Content} content .
+   */
+  show(items, { html, show, actions }) {
+    this.$dialog.innerHTML = `${html()}${items
+      .map((label, index) => this.menuItem(label, index))
+      .join("")}`;
+    if (show != null) show(this.$dialog);
+    this._actions = actions;
+    this.$dialog.classList.remove("fade-out");
+    this.$dialog.dispatchEvent(new CustomEvent("dialogShow"));
+  }
+
+  hide() {
+    this.$dialog.innerHTML = "";
+    this.$dialog.dispatchEvent(new CustomEvent("dialogHide"));
+    this.$dialog.classList.add("fade-out");
+  }
+
+  static bindingNames = ["", "altKey", "shiftKey", "ctrlKey"];
+  static hotkeyPrefixes = ["Click", "Alt+Click", "Shift+Click", "Ctrl+Click"];
+
+  /**
+   * bind listeners.
+   *
+   * @param {HTMLAnchorElement} $trigger .
+   * @param {string[]} items .
+   * @param {(event: MouseEvent) => Content | undefined} handler .
+   */
+  listen($trigger, items, handler) {
+    /** @type {{t: number | undefined, x: number, y: number}} */
+    const clickAt = { t: undefined, x: 0, y: 0 };
+    const clearTimer = () => {
+      if (clickAt.t === undefined) return;
+      window.clearTimeout(clickAt.t);
+      clickAt.t = undefined;
+    };
+
+    /** @param {MouseEvent} event . */
+    const contextmenu = (event) => {
+      clearTimer();
+      event.preventDefault();
+      event.stopPropagation();
+      const content = handler(event);
+      if (content != null) this.show(items, content);
+    };
+    $trigger.addEventListener("contextmenu", contextmenu);
+    // $trigger.addEventListener("dblclick", contextmenu);
+
+    $trigger.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const content = handler(event);
+      if (content == null) return;
+      if (clickAt.t !== undefined) {
+        const move =
+          Math.pow(event.x - clickAt.x, 2) + Math.pow(event.y - clickAt.y, 2);
+        clearTimer();
+        if (move < /* < 10^2 */ 100) {
+          this.show(items, content);
+          return;
+        }
+      }
+      if (content.actions == null || content.actions.length === 0) return;
+      // else
+      clearTimer();
+
+      for (let i = Dialog.bindingNames.length - 1; i >= 0; i--) {
+        const key = Dialog.bindingNames[i];
+        const action = content.actions[i];
+        if (key && event[key] && action != null) {
+          action(this.$dialog, event);
+          return;
+        }
+      }
+      const click = content.actions[0];
+      if (click == null) {
+        this.show(items, content);
+        return;
+      }
+      clickAt.x = event.x;
+      clickAt.y = event.y;
+      clickAt.t = setTimeout(() => {
+        clickAt.t = undefined;
+        click(this.$dialog, event);
+      }, 200);
+    });
+  }
+
+  /**
+   * create menu item.
+   *
+   * @param {string} label .
+   * @param {number} index .
+   * @returns {string}
+   */
+  menuItem(label, index) {
+    if (label == null) return "";
+    const hotkey = `<small>${Dialog.hotkeyPrefixes[index] ?? ""}</small>`;
+    return `<a id="act${index}" href="javascript:void(0);"><span>${label}</span>${hotkey}</a>`;
+  }
+
+  /** @param {Dialog} dialog . */
+  static modal(dialog) {
+    const $modal = document.createElement("div");
+    $modal.classList.add("modal");
+    $modal.appendChild(dialog.$dialog);
+    dialog.$dialog.addEventListener(
+      "dialogShow",
+      ({ currentTarget: { parentElement: $modal } }) => {
+        $modal.classList.remove("fade-out");
+        $modal.classList.add("show");
+      }
+    );
+    dialog.$dialog.addEventListener(
+      "dialogHide",
+      ({ currentTarget: { parentElement: $modal } }) => {
+        $modal.classList.add("fade-out");
+        setTimeout(() => {
+          $modal.classList.remove("fade-out");
+          $modal.classList.remove("show");
+        }, 300);
+      }
+    );
+    $modal.addEventListener("mouseup", (event) => {
+      if (event.target !== event.currentTarget) return;
+      event.preventDefault();
+      event.stopPropagation();
+      dialog.hide();
+    });
+    $modal.addEventListener("contextmenu", (event) => {
+      if (event.target !== event.currentTarget) return;
+      event.preventDefault();
+      event.stopPropagation();
+      dialog.hide();
+    });
+    return $modal;
   }
 }
 
@@ -387,32 +667,16 @@ function parseRGBA(color) {
 }
 
 /**
- * export file.
+ * dump file.
  *
- * @param {Blob} blob .
  * @param {string} name .
+ * @param {string} url .
  */
-function exportFile(blob, name) {
+function dumpFile(name, url) {
   const $save = document.createElement("a");
-  $save.href = URL.createObjectURL(blob);
+  $save.href = url;
   $save.download = name;
   $save.click();
-  setTimeout(() => URL.revokeObjectURL($save.href), 0);
-}
-
-/**
- * export image.
- *
- * @param {HTMLCanvasElement} canvas .
- * @param {string} name .
- * @param {"png" | "webp"} [format="webp"]
- */
-function exportImage(canvas, name, format = "webp") {
-  canvas.toBlob(
-    (blob) => exportFile(blob, `${name}.${format}`),
-    `image/${format}`,
-    1.0
-  );
 }
 
 /**
@@ -445,29 +709,37 @@ function* chunkRects({ width, height }, chunkSize) {
 
 /**
  * listen drop upload
- * @param {HTMLElement} $target .
- * @param {(files: FileList) => void} upload .
+ *
+ * @param {App} app .
+ * @param {HTMLElement} $root .
  */
-function listenUpload($target, upload) {
-  $target.addEventListener("dragenter", (event) => {
+function listenUpload(app, $root) {
+  /** @type {EventTarget | null} */ let target = null;
+  $root.addEventListener("dragenter", (event) => {
     event.preventDefault();
     event.stopPropagation();
-    event.currentTarget.classList.add("dragover");
+    target = event.target;
+    const isFile = event.dataTransfer.types.some((type) => type === "Files");
+    if (isFile) event.currentTarget.classList.add("dragover");
   });
-  $target.addEventListener("dragover", (event) => {
+  $root.addEventListener("dragover", (event) => {
     event.preventDefault();
     event.stopPropagation();
   });
-  $target.addEventListener("dragleave", (event) => {
+  $root.addEventListener("dragleave", (event) => {
     event.preventDefault();
     event.stopPropagation();
+    if (target === event.target) {
+      target = null;
+      event.currentTarget.classList.remove("dragover");
+    }
+  });
+  $root.addEventListener("drop", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    target = null;
     event.currentTarget.classList.remove("dragover");
-  });
-  $target.addEventListener("drop", (event) => {
-    event.preventDefault();
-    event.stopPropagation();
-    event.currentTarget.classList.remove("dragover");
-    upload(event.dataTransfer.files);
+    app.handleUpload(event.dataTransfer.files);
   });
 }
 
@@ -481,7 +753,7 @@ function fetchAndParse(app, query) {
   const params = new URLSearchParams(window.location.search);
   for (const value of params.getAll(query)) {
     const url = new URL(window.decodeURI(value), import.meta.url);
-    console.debug(`${TAG} auto fetch and parse, url: ${url}`);
+    app.log("debug", `auto fetch and parse, url: ${url}`);
     fetch(url, { mode: "cors" }).then(async (resp) => {
       if (!resp.ok) return;
       const blob = resp.blob();
@@ -496,16 +768,13 @@ function fetchAndParse(app, query) {
  * create palette color element.
  *
  * @param {number} index .
- * @param {string} code .
  * @param {Palette} palette .
  * @returns {HTMLAnchorElement} .
  */
-function paletteColor(index, code, { color, count, dirty, split }) {
+function paletteColor(index, { code, color, count, dirty }) {
   const $color = document.createElement("a");
   $color.id = `color${code}`;
-  $color.title = `${index}. ${code}${
-    split === undefined || code[8] === "_" ? "" : "_0"
-  }: ${
+  $color.title = `${index}. ${code}: ${
     count < 1000
       ? `${count}`
       : count < 1000000
@@ -526,61 +795,14 @@ function paletteColor(index, code, { color, count, dirty, split }) {
   return $color;
 }
 
-/**
- * build color dialog html.
- *
- * @param {string} hex .
- * @param {number} color .
- * @param {string} title .
- * @param {boolean} disable .
- * @returns .
- */
-function colorDialogHTML(hex, color, title, disable) {
-  const rgba = parseRGBA(color);
-  const rgbHex = hex.slice(0, 7);
-  return `
-    <div>
-      <span class="color tp-grid" style="--color: ${hex};"></span>
-      <span class="props">
-        <span>${title}</span>
-        <small>rgba(${rgba.join(", ")})</small>
-      </span>
-    </div>
-    <div id="colorPicker">
-      <label id="rgb">
-        <input type="color" value="${rgbHex}" />
-        <pre>${rgbHex}</pre>
-      </label>
-      <label id="alpha">
-        <input type="range" min="0" max="255" value="${rgba[3]}" />
-        <pre>A: ${rgba[3]}</pre>
-      </label>
-    </div>
-    <a id="submit" href="javascript:void(0);">
-      <span>Submit</span>
-    </a>
-    <a id="toggle" href="javascript:void(0);">
-      <span>Toggle</span>
-      <small>Shift+Click</small>
-    </a>
-    <a id="focus" href="javascript:void(0);">
-      <span>Focus</span>
-      <small>Ctrl+Click</small>
-    </a>
-    <a id="exclude" href="javascript:void(0);">
-      <span>Exclude</span>
-      <small>Alt+Click</small>
-    </a>
-    <a id="split" href="javascript:void(0);">
-      <span>Split</span>
-      <small>Right Click</small>
-    </a>
-  `;
-}
-
 //#endregion
 
 //#region layout
+
+//prettier-ignore
+const menuIcon = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+  <g fill="var(--color)">${[5, 12, 19].map((x) => `<circle cx="${x}" cy="12" r="2" />`)}</g>
+</svg>`;
 
 /**
  * create titlebar.
@@ -589,174 +811,187 @@ function colorDialogHTML(hex, color, title, disable) {
  * @returns titlebar element
  */
 function createTitlebar(app) {
-  const $clear = document.createElement("a");
-  $clear.id = "clear";
-  $clear.href = "javascript:void(0);";
-  $clear.title = "clear all";
-  $clear.innerText = "🔄️";
-  $clear.addEventListener("click", app.clearCache.bind(app));
+  const $upload = document.createElement("label");
+  $upload.id = "upload";
+  $upload.innerHTML = `<input type="file" multiple /><span class="drag-tips">Drag the image here.</span>`;
+  $upload.addEventListener("input", (event) =>
+    app.handleUpload(event.target.files)
+  );
 
-  const $input = document.createElement("input");
-  $input.type = "file";
-  $input.multiple = true;
-  $input.addEventListener("input", (event) => {
-    const { files } = event.currentTarget;
-    app.handleUpload(files);
-  });
-  app.addEventListener("clear", () => {
-    $input.files = null;
-    $input.value = "";
-  });
-  app.addEventListener("uploaded", (event) => {
-    $input.files = event.detail;
-  });
-
-  const $controller = document.createElement("div");
-  $controller.classList.add("controller");
-  $controller.appendChild($clear);
-  $controller.appendChild($input);
-
-  const $label = document.createElement("label");
-  $label.id = "titlebar";
-  $label.innerHTML = '<span class="drag-tips">Drag the image here.</span>';
-  $label.appendChild($controller);
-  listenUpload($label, app.handleUpload);
-  return $label;
-}
-
-const emptyColorHtml =
-  '<a id="emptyColor" href="javascript:void(0);" class="tp-grid"><span/></a>';
-
-/**
- * create palette.
- *
- * @param {App} app .
- * @returns palette element
- */
-function createPalette(app) {
   const $colors = document.createElement("div");
-  $colors.classList.add("colors");
+  $colors.classList.add("colors", "hide");
   app.addEventListener("clear", () => {
-    $colors.innerHTML = emptyColorHtml;
+    $upload.classList.remove("hide");
+    $colors.innerHTML = "";
+    $colors.classList.add("hide");
   });
   app.addEventListener(
     "updatePalette",
-    /** @param {CustomEvent<{[code: string]: Palette}>} event . */ ({
+    /** @param {CustomEvent<Iterable<Palette>>} event . */ ({
       detail: palettes,
     }) => {
       $colors.innerHTML = "";
-      const colors = Object.entries(palettes);
-      colors.sort(([_o1, { count: c1 }], [_o2, { count: c2 }]) =>
-        c1 < c2 ? 1 : c1 > c2 ? -1 : 0
-      );
-      let index = 0;
-      for (const [code, palette] of colors) {
-        if (code[8] === "_") continue;
-        const $color = paletteColor(index++, code, palette);
+      let i = 0;
+      for (const palette of palettes) {
+        const $color = paletteColor(++i, palette);
         $colors.appendChild($color);
-        if (palette.split === undefined) continue;
-        for (const code of palette.split) {
-          const palette = palettes[code];
-          const $color = paletteColor(index++, code, palette);
-          $colors.appendChild($color);
-        }
+      }
+      if (i > 0) {
+        $upload.classList.add("hide");
+        $colors.classList.remove("hide");
       }
     }
   );
-
-  const $dialog = document.createElement("div");
-  $dialog.classList.add("dialog");
-  function closeDialog() {
-    $dialog.classList.remove("show");
-    $dialog.innerHTML = "";
-  }
-  $dialog.addEventListener("click", ({ target, currentTarget }) => {
-    if (target === currentTarget) closeDialog();
-  });
-  $colors.addEventListener(
-    "click",
-    ({ target: $color, ctrlKey, shiftKey, altKey }) => {
+  app.dialog.listen(
+    $colors,
+    ["Toggle", "Exclude", "Focus", "Split"],
+    ({ target: $color }) => {
       if (!($color instanceof HTMLAnchorElement)) return;
-      if (!$color.id.startsWith("color")) return;
       const code = $color.id.slice(5);
       const hex = $color.style.getPropertyValue("--color");
       const color = Number.parseInt(hex.slice(1), 16);
+      const rgba = parseRGBA(color);
 
-      function toggleDisable(disable) {
+      const html = () => `<div class="titlebar header hr">
+        <span class="color tp-grid" style="--color: ${hex};"></span>
+        <label>
+          <span>${$color.title}</span>
+          <small>rgba(${rgba.join(", ")})</small>
+        </label>
+      </div>
+      <div id="colorPicker">
+        <label id="rgb">
+          <input type="color" value="${hex.slice(0, 7)}" />
+          <pre>${hex.slice(0, 7)}</pre>
+        </label>
+        <label id="alpha">
+          <input type="range" min="0" max="255" value="${rgba[3]}" />
+          <pre>A: ${rgba[3]}</pre>
+        </label>
+      </div>
+      <a id="submit" class="footer" href="javascript:void(0);">Submit</a>`;
+
+      /** @param {HTMLDivElement} $dialog . */
+      const show = ($dialog) => {
+        const $rgb = $dialog.querySelector("label#rgb>input");
+        $rgb.addEventListener("input", (event) => {
+          const value = event.currentTarget.value;
+          $dialog.querySelector("label#rgb>pre").innerHTML = value;
+        });
+        const $alpha = $dialog.querySelector("label#alpha>input");
+        $alpha.addEventListener("input", (event) => {
+          const value = event.currentTarget.value;
+          const text = `A: ${value.padStart(3, " ")}`;
+          $dialog.querySelector("label#alpha>pre").innerHTML = text;
+        });
+        const $submit = $dialog.querySelector("#submit");
+        $submit.addEventListener("click", () => {
+          app.dialog.hide();
+          const rgb = Number.parseInt($rgb.value.slice(1), 16);
+          const alpha = Number.parseInt($alpha.value);
+          const color = rgb * 256 + alpha;
+          app.updateColor(code, color);
+          app.flushDirty();
+          app.log(
+            "info",
+            `color updated, code: ${code}, color: #${color.toString(16)}`
+          );
+        });
+      };
+
+      const toggle = () => {
+        const disable = !$color.classList.contains("cross-out");
         app.updateColor(code, disable ? 0x00000000 : color);
         app.flushDirty();
-      }
-      function batchDisable(disable) {
+        app.log("info", `color ${disable ? "disabled" : "enabled "}: ${code}`);
+      };
+      const highlight = (focus) => {
         for (const $color of $colors.children) {
           if (!($color instanceof HTMLAnchorElement)) continue;
           if (!$color.id.startsWith("color")) continue;
           const code = $color.id.slice(5);
           const hex = $color.style.getPropertyValue("--color");
           const color = Number.parseInt(hex.slice(1), 16);
-          app.updateColor(code, disable ? 0x00000000 : color);
+          app.updateColor(code, focus ? 0x00000000 : color);
         }
-        app.updateColor(code, disable ? color : 0x00000000);
+        app.updateColor(code, focus ? color : 0x00000000);
         app.flushDirty();
-      }
-      const disable = $color.classList.contains("cross-out");
-      if (shiftKey) return toggleDisable(!disable);
-      if (ctrlKey) return batchDisable(true);
-      if (altKey) return batchDisable(false);
-
-      $dialog.innerHTML = colorDialogHTML(hex, color, $color.title, disable);
-      $dialog.classList.add("show");
-      $dialog.querySelector("#toggle").addEventListener("click", () => {
-        closeDialog();
-        toggleDisable(!disable);
-      });
-      $dialog.querySelector("#focus").addEventListener("click", () => {
-        closeDialog();
-        batchDisable(true);
-      });
-      $dialog.querySelector("#exclude").addEventListener("click", () => {
-        closeDialog();
-        batchDisable(false);
-      });
-      $dialog.querySelector("#split").addEventListener("click", () => {
-        closeDialog();
-        app.splitColor(code);
-      });
-      const $rgb = $dialog.querySelector("label#rgb>input");
-      const $alpha = $dialog.querySelector("label#alpha>input");
-      $rgb.addEventListener("input", (event) => {
-        const value = event.currentTarget.value;
-        $dialog.querySelector("label#rgb>pre").innerHTML = value;
-      });
-      $alpha.addEventListener("input", (event) => {
-        const value = event.currentTarget.value;
-        const text = `A: ${value.padStart(3, " ")}`;
-        $dialog.querySelector("label#alpha>pre").innerHTML = text;
-      });
-      $dialog.querySelector("#submit").addEventListener("click", () => {
-        closeDialog();
-        const rgb = Number.parseInt($rgb.value.slice(1), 16);
-        const alpha = Number.parseInt($alpha.value);
-        const color = rgb * 256 + alpha;
-        app.updateColor(code, color);
-        app.flushDirty();
-      });
+        app.log("info", `color ${focus ? "focused " : "excluded"}: ${code}`);
+      };
+      const actions = [
+        toggle,
+        () => highlight(false),
+        () => highlight(true),
+        () => app.splitColor(code),
+      ];
+      return { html, show, actions };
     }
   );
-  $colors.addEventListener("contextmenu", (event) => {
-    event.preventDefault();
-    event.stopPropagation();
-    const { target: $color } = event;
-    if (!($color instanceof HTMLAnchorElement)) return;
-    if (!$color.id.startsWith("color")) return;
-    const code = $color.id.slice(5);
-    app.splitColor(code);
-  });
+
+  const $menu = document.createElement("a");
+  $menu.id = "menu";
+  $menu.href = "javascript:void(0);";
+  $menu.title = "Expand menu";
+  $menu.innerHTML = menuIcon;
+  $menu.classList.add("icon");
+  app.dialog.listen(
+    $menu,
+    [
+      undefined, // Show menu
+      undefined, // "Prev layer",
+      undefined, // "Next layer",
+      "Exports",
+      "- Dump palettes",
+      "- Dump archives",
+    ],
+    () => {
+      const html = () => `<label class="header hr">
+        <span>
+          <span>Layer:</span>
+          <input type="number" min="0" max="5" value="1">
+          <span>/</span>
+          <span class="titlebar layer-num">
+            <button id="delete" title="delete layer">-</button>
+            <span>5</span>
+            <button id="create" title="create layer">+</button>
+          </span>
+        </span>
+        <small>${app.paletteNum} color in ${app.archiveNum} archive</small>
+      </label>`;
+      // TODO
+      const prevLayer = () => {
+        app.log("info", "prev");
+      };
+      const nextLayer = () => {
+        app.log("info", "next");
+      };
+      return {
+        html,
+        actions: [
+          undefined, // Show menu
+          prevLayer,
+          nextLayer,
+          () => {
+            const dump = app.dump();
+            dump.palettes();
+            dump.archives();
+          },
+          () => {
+            app.dump().palettes();
+          },
+          () => {
+            app.dump().archives();
+          },
+        ],
+      };
+    }
+  );
 
   const $panel = document.createElement("div");
-  $panel.id = "palette";
+  $panel.id = "titlebar";
+  $panel.appendChild($upload);
   $panel.appendChild($colors);
-  $panel.appendChild($dialog);
-  listenUpload($panel, app.handleUpload);
+  $panel.appendChild($menu);
   return $panel;
 }
 
@@ -769,22 +1004,102 @@ function createPalette(app) {
 function createArchives(app) {
   const $images = document.createElement("div");
   $images.id = "images";
+  $images.classList.add("tp-grid");
   app.addEventListener("clear", () => {
     $images.innerHTML = "";
   });
   app.addEventListener(
     "createImage",
-    /** @param {CustomEvent<Archive>} event . */ ({ detail: { canvas } }) => {
-      $images.appendChild(canvas);
+    /** @param {CustomEvent<Archive>} event . */
+    ({ detail: { ctx } }) => {
+      $images.appendChild(ctx.canvas);
+    }
+  );
+
+  /** @type {[x: number, y: number] | null} */ let selectArea = null;
+  app.dialog.listen(
+    $images,
+    ["Zoom area", "Cut area", "Add area", "Restore"],
+    ({ target: $canvas }) => {
+      if (!($canvas instanceof HTMLCanvasElement)) return;
+      const arch = $canvas.title;
+      const { ctx, chunks } = app.archives[arch];
+      const { width, height } = ctx.canvas;
+      const html = () => `<label class="header hr">
+        <span>${arch}</span>
+        <small>${width}x${height} with ${chunks.length} chunk</small>
+      </label>`;
+      // TODO
+      return {
+        html,
+        actions: [
+          () => {
+            app.log("info", "click");
+          },
+          () => {
+            app.log("info", "alt");
+          },
+          () => {
+            app.log("info", "shift");
+          },
+          () => {
+            app.log("info", "ctrl");
+          },
+        ],
+      };
     }
   );
 
   const $panel = document.createElement("div");
   $panel.id = "archives";
-  $panel.classList.add("tp-grid");
   $panel.appendChild($images);
-  listenUpload($panel, app.handleUpload);
   return $panel;
+}
+
+/**
+ * create messages.
+ *
+ * @param {App} app .
+ * @param {boolean} silent .
+ * @returns messages box
+ */
+function createMessages(app, silent) {
+  const $box = document.createElement("div");
+  $box.id = "messages";
+
+  /**
+   * show message.
+   *
+   * @param {LogLevel} level .
+   * @param {string} message .
+   * @param {number} [delay=3000] .
+   */
+  function showMessage(level, message, delay = 3000) {
+    const $pre = document.createElement("pre");
+    $pre.innerHTML = message;
+    $pre.classList.add(level);
+    $box.appendChild($pre);
+    setTimeout(() => $pre.classList.add("fade-out"), delay);
+    setTimeout(() => $pre.remove(), delay + 500);
+  }
+  app.addEventListener(
+    "log",
+    /** @param {CustomEvent<{level: LogLevel, message: string}>} */
+    ({ detail: { level, message } }) => showMessage(level, message)
+  );
+  if (!silent) {
+    fetch(new URL("./package.json", import.meta.url))
+      .then((resp) => resp.json())
+      .then(({ name, version, author, license, homepage }) => {
+        const message = [
+          `| ${name} v${version} ${author} |`,
+          `|_ ${license} ${homepage} _|`,
+        ].join("\n");
+        console.info(message);
+        showMessage("info", message, 1000);
+      });
+  }
+  return $box;
 }
 
 /**
@@ -835,13 +1150,16 @@ async function fetchStyle(url) {
  * @param {App} app .
  * @param {HTMLElement | string} root root element or it's selector
  * @param {string} [query="parse"] uri query keyword for auto upload and parse file
+ * @param {boolean} [silent=false] do not show package information.
  */
-export function render(app, root = ".mppa", query = "fetch") {
+export function render(app, root = ".mppa", query = "fetch", silent = false) {
   const $root =
     root instanceof HTMLElement ? root : document.querySelector(root);
   $root.appendChild(createTitlebar(app));
-  $root.appendChild(createPalette(app));
   $root.appendChild(createArchives(app));
+  $root.appendChild(createMessages(app, silent));
+  $root.append(Dialog.modal(app.dialog));
+  listenUpload(app, $root);
   if (query) fetchAndParse(app, query);
 }
 
@@ -855,14 +1173,17 @@ export function render(app, root = ".mppa", query = "fetch") {
  * create root.
  *
  * @param {App} app .
- * @param {{id?: string, theme?: "light" | "dark"}} [props={}] .
+ * @param {{id?: string, theme?: "light" | "dark", query?: string, silent?: boolean }} [props={}] .
  * @returns root element
  */
-export function inject(app, { scope = "mppa", theme = "light" } = {}) {
+export function inject(
+  app,
+  { scope = "mppa", theme = "light", query = "fetch", silent = false } = {}
+) {
   const $root = document.createElement("div");
   $root.classList.add(scope, theme);
   $root.appendChild(createStyle(scope));
-  render(app, $root);
+  render(app, $root, query, silent);
   return $root;
 }
 
@@ -891,7 +1212,10 @@ export function init({ name = "ma-pa-p-a", mode = "closed" } = {}) {
     connectedCallback() {
       const scope = this.getAttribute("scope") ?? "mppa";
       const theme = this.getAttribute("theme") ?? "light";
-      const $root = inject(this.app, { scope, theme });
+      const query = this.getAttribute("query") ?? "fetch";
+      const silent =
+        this.hasAttribute("silent") && this.getAttribute("silent") !== "false";
+      const $root = inject(this.app, { scope, theme, query, silent });
       this.app.addEventListener(
         "updateTheme",
         /** @param {CustomEvent<"light" | "dark">} event . */ ({
@@ -933,35 +1257,3 @@ export function init({ name = "ma-pa-p-a", mode = "closed" } = {}) {
 }
 
 //#endregion
-
-// log package info.
-setTimeout(async () => {
-  const pkg = await fetch(new URL("./package.json", import.meta.url)).then(
-    (resp) => resp.json()
-  );
-  const label = `${pkg.name} v${pkg.version}`;
-  const pkgInfo = [
-    `%c${label}%c`,
-    `%c${pkg.author}%c`,
-    "\n",
-    `%c${pkg.license}%c`,
-    `%c${pkg.homepage}%c`,
-    "\n",
-  ].join("");
-
-  const padding = "padding: 0.2em 0.5em;";
-  const style = [
-    ...[`background: #6cf; color: #fff; ${padding}`, ""],
-    ...[`color: #6cc; ${padding}`, ""],
-    ...[],
-    ...[`background: #e00; color: #9ff; ${padding}`, ""],
-    ...[`${padding}`, ""],
-    ...[],
-  ];
-
-  if (typeof window === "undefined") {
-    console.info(pkgInfo.replace(/%c/g, " * "));
-  } else {
-    console.info(pkgInfo, ...style);
-  }
-}, 300);

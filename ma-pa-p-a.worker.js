@@ -32,6 +32,15 @@ const routers = {
     const trans = [output, plte.buffer, data.buffer];
     return { arch, chunk, data, plte, trans };
   },
+
+  dumpPalettes: async ({ name, plte, width, height }) => {
+    // return { name: `${name}.mppa`, url: URL.createObjectURL(new Blob([plte])) };
+    const url = services.canvas.dump(plte, width, height, "png");
+    return { name: `${name}.png`, url: await url };
+  },
+  dumpArchives: async ({ name, data }) => {
+    // TODO
+  },
 };
 
 //
@@ -85,6 +94,27 @@ class CanvasService {
       }
     }
     return data;
+  }
+
+  /**
+   * dump to iamge blob.
+   *
+   * @param {Uint8ClampedArray} source .
+   * @param {number} width .
+   * @param {number} height .
+   * @param {"png" | "webp"} type .
+   * @returns {Promise<Blob>}
+   */
+  async dump(source, width, height, type) {
+    this.ctx.canvas.width = width;
+    this.ctx.canvas.height = height;
+    const data = new ImageData(source, width, height);
+    this.ctx.putImageData(data, 0, 0);
+    const blob = this.ctx.canvas.convertToBlob({
+      quality: 1,
+      type: `image/${type}`,
+    });
+    return URL.createObjectURL(await blob);
   }
 }
 

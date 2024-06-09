@@ -1,4 +1,5 @@
-/* theme */
+/* #region theme */
+
 .mppa,
 .mppa.light {
   color-scheme: light;
@@ -16,6 +17,13 @@
   --notes: #c0c0c0;
   --title: #ffffff;
 }
+.mppa {
+  font-family: "Consolas", monospace;
+}
+
+/* #endregion */
+
+/* #region utils */
 
 .mppa {
   display: flex;
@@ -27,10 +35,18 @@
 
   background-color: var(--board);
   color: var(--notes);
+  user-select: none;
 }
+
 .mppa a {
   text-decoration: none;
   color: var(--notes);
+  &.icon {
+    --color: var(--frame);
+  }
+  &.icon:hover {
+    --color: var(--notes);
+  }
 }
 
 /* transparent grid */
@@ -45,12 +61,12 @@
   left: 0;
   top: 0;
   background-image: repeating-linear-gradient(
-      0deg,
+      90deg,
       black 0 var(--grid-size),
       white 0 calc(2 * var(--grid-size))
     ),
     repeating-linear-gradient(
-      90deg,
+      180deg,
       black 0 var(--grid-size),
       white 0 calc(2 * var(--grid-size))
     );
@@ -58,78 +74,9 @@
   opacity: 0.1;
   pointer-events: none;
 }
-
-/* dialog */
-.mppa .dialog {
-  position: fixed;
-  display: none;
-  width: 100%;
-  height: 100%;
-  left: 0;
-  top: 0;
-  z-index: 100;
-  backdrop-filter: blur(6px);
-
-  &.show {
-    display: flex;
-  }
-  &::before {
-    content: "";
-    position: absolute;
-    width: 100%;
-    height: 100%;
-    left: 0;
-    top: 0;
-    z-index: -1;
-    background-color: var(--board);
-    opacity: 0.3;
-  }
-
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-
-  & > :first-child {
-    border-top-left-radius: 0.5em;
-    border-top-right-radius: 0.5em;
-    border-bottom: 1px solid var(--frame);
-  }
-  & > :last-child {
-    border-bottom-left-radius: 0.5em;
-    border-bottom-right-radius: 0.5em;
-  }
-  & > * {
-    background-color: var(--board);
-    min-width: 12em;
-    width: 70%;
-    padding: 1em;
-    position: relative;
-    &:hover {
-      color: var(--title);
-    }
-    &::before {
-      content: "";
-      position: absolute;
-      width: 0;
-      height: 100%;
-      left: 50%;
-      top: 0;
-      background-color: var(--notes);
-      opacity: 0;
-      z-index: -1;
-    }
-    &:hover::before {
-      width: 100%;
-      left: 0;
-      opacity: 0.1;
-      transition: width 0.2s, left 0.2s, opacity 0.6s;
-    }
-
-    & > small {
-      float: right;
-      color: var(--frame);
-    }
-  }
+.mppa .fade-out {
+  transition: opacity 0.5s;
+  opacity: 0;
 }
 
 /* color picker */
@@ -151,61 +98,53 @@
   }
 }
 
-/* titlebar */
+/* #endregion */
+
+/* #region titlebar */
+
 .mppa > #titlebar {
-  border: 1px dashed var(--frame);
-  height: 3em;
-  line-height: 3em;
-  cursor: pointer;
-  &:hover {
-    color: var(--title);
-  }
+  position: relative;
+  flex: 0 0 auto;
+  border: 1px solid var(--frame);
+  border-radius: 0.2em;
+  min-height: 1.5em;
+  padding: 0.25em;
+  display: flex;
 
   & > * {
-    pointer-events: none;
-    white-space: nowrap;
+    padding: 0.25em;
+    display: flex;
   }
-  & > .drag-tips {
+  & > .hide {
     display: none;
   }
-  &.dragover > .drag-tips {
-    display: block;
-    text-align: center;
+  & > #upload {
+    flex: 1 1 auto;
+    & > span {
+      display: none;
+    }
   }
-  &.dragover > .controller {
-    display: none;
+  & > .colors {
+    flex: 1 1 auto;
+    flex-wrap: wrap;
+    gap: 0.25em;
   }
-
-  & > .controller > * {
-    padding: 0 0.5em;
-  }
-  & > .controller > a {
-    pointer-events: visible;
-  }
-}
-
-/* palette */
-.mppa > #palette {
-  border: 1px solid var(--frame);
-  flex: 0 1 auto;
-  padding: 0.3em;
-  --grid-size: 4px;
-
   & > .colors > a {
     position: relative;
     display: inline-block;
-    padding: 0.5em;
-    margin: 0 0.15em;
+    width: 1.5em;
+    height: 1.5em;
+    --grid-size: 4px;
 
     & > span {
       position: absolute;
-      width: 100%;
-      height: 100%;
+      width: 1.5em;
+      height: 1.5em;
       left: 0;
       top: 0;
       border: 1px solid var(--frame);
-      box-sizing: border-box;
       background-color: var(--color);
+      box-sizing: border-box;
       pointer-events: none;
     }
     &:hover > span {
@@ -214,6 +153,8 @@
       left: -10%;
       top: -10%;
       border-radius: 0.3em;
+    }
+    &:active > span {
       border-color: var(--title);
     }
 
@@ -240,70 +181,92 @@
       rotate: 45deg;
     }
   }
-
-  & .dialog .color {
-    float: left;
-    height: 3em;
-    width: 3em;
-    line-height: 3em;
-    background-color: var(--paper);
-    border-radius: 1.5em;
-    position: relative;
-    overflow: hidden;
-    &::after {
-      content: "";
-      position: absolute;
-      padding: 1em;
-      border-radius: 1em;
-      left: 0.5em;
-      top: 0.5em;
-      background-color: var(--color);
-    }
-  }
-  & .dialog .props {
-    display: inline-block;
+  & > #menu {
+    flex: 0 0 1.5em;
     text-align: center;
-    white-space: nowrap;
-    overflow: hidden;
-    & > * {
-      line-height: 1em;
-      display: block;
-      padding: 0.2em 1em;
+    &:hover {
+      --color: var(--title);
+      background-color: var(--frame);
+      border-radius: 0.2em;
     }
   }
-  & .dialog #submit {
-    padding-top: 0;
-    border-bottom: 1px solid var(--frame);
+}
+.mppa.dragover > #titlebar {
+  & > #upload,
+  & > #upload.hide {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    & > span {
+      display: block;
+    }
+    & > input {
+      display: none;
+    }
+  }
+  & > .colors {
+    display: none;
+  }
+}
+& .dialog > .header {
+  &.titlebar {
+    display: flex;
+    flex-wrap: nowrap;
+    & > .color {
+      flex: 0 0 3em;
+      height: 3em;
+      line-height: 3em;
+      background-color: var(--paper);
+      border-radius: 1.5em;
+      position: relative;
+      overflow: hidden;
+      --grid-size: 8px;
+
+      &::after {
+        content: "";
+        position: absolute;
+        padding: 1em;
+        border-radius: 1em;
+        left: 0.5em;
+        top: 0.5em;
+        background-color: var(--color);
+      }
+    }
+    & > label {
+      flex: 1 1 auto;
+    }
+  }
+  & .titlebar.layer-num {
+    margin: 0.5em;
+    & > button {
+      font-family: inherit;
+      font-weight: bold;
+      cursor: pointer;
+      margin: -0.3em;
+    }
   }
 }
 
-/* archives */
+/* #endregion */
+
+/* #region archives */
+
 .mppa > #archives {
-  flex: 1 1 32em;
-  min-height: 6em;
-  padding: 0.3em;
   position: relative;
-  overflow: hidden;
+  flex: 1 1 32em;
+  overflow: hidden scroll;
+  cursor: crosshair;
   --grid-size: 16px;
 
   & > #images {
     position: relative;
-    height: 100%;
-    overflow-y: scroll;
+    padding: 0.3em;
+    min-height: calc(100% - 0.6em);
     user-select: none;
-
-    /* scrollbar-width: 0;
-    &::-webkit-scrollbar {
-      display: none;
-    } */
 
     & > canvas {
       position: relative;
-      margin: 0 0.1em;
-      border: 1px solid var(--frame);
-      max-width: calc(100% - 2px - 0.2em);
-      cursor: crosshair;
-
+      max-width: 100%;
       &.loading {
         width: 64px;
         height: 64px;
@@ -311,3 +274,163 @@
     }
   }
 }
+
+/* #endregion */
+
+/* #region messages */
+
+.mppa > #messages {
+  position: absolute;
+  min-width: 8em;
+  min-height: 2em;
+  bottom: 0.5em;
+  right: 0.5em;
+  display: flex;
+  flex-direction: column-reverse;
+  pointer-events: none;
+  & > pre {
+    position: relative;
+    padding: 0.2em 0.5em;
+    margin: 0.2em;
+    backdrop-filter: blur(3px);
+    z-index: 200;
+    font-size: 1.2em;
+
+    &.debug {
+      display: none;
+      color: var(--notes);
+    }
+    &.info {
+      color: var(--title);
+    }
+    &.warn {
+      color: yellow;
+    }
+    &.error {
+      color: red;
+    }
+  }
+  & > pre::before {
+    content: "";
+    position: absolute;
+    width: 100%;
+    height: 100%;
+    left: 0;
+    top: 0;
+    background-color: var(--paper);
+    opacity: 0.5;
+    z-index: -1;
+  }
+}
+
+/* #endregion */
+
+/* #region dialog */
+
+.mppa .modal {
+  position: absolute;
+  width: 100%;
+  height: 100%;
+  left: 0;
+  top: 0;
+  display: none;
+  &.show {
+    display: flex;
+  }
+  justify-content: center;
+  align-items: center;
+  z-index: 100;
+  backdrop-filter: blur(3px);
+
+  &::before {
+    content: "";
+    position: absolute;
+    width: 100%;
+    height: 100%;
+    left: 0;
+    top: 0;
+    background-color: var(--board);
+    opacity: 0.3;
+  }
+  & > .dialog {
+    min-width: 12em;
+    width: 70%;
+  }
+}
+
+.mppa .dialog {
+  max-height: 100%;
+  overflow: auto;
+
+  & > :first-child,
+  & > :first-child::before {
+    border-top-left-radius: 0.5em;
+    border-top-right-radius: 0.5em;
+  }
+  & > :last-child,
+  & > :last-child::before {
+    border-bottom-left-radius: 0.5em;
+    border-bottom-right-radius: 0.5em;
+  }
+
+  & > * {
+    background-color: var(--board);
+    position: relative;
+    display: block;
+    width: 100%;
+    box-sizing: border-box;
+    padding: 1em;
+    z-index: 1;
+    &:hover {
+      color: var(--title);
+    }
+    &::before {
+      content: "";
+      position: absolute;
+      width: 0;
+      height: 100%;
+      left: 50%;
+      top: 0;
+      background-color: var(--notes);
+      opacity: 0;
+      z-index: -1;
+    }
+    &:hover::before {
+      width: 100%;
+      left: 0;
+      opacity: 0.1;
+      transition: width 0.3s, left 0.3s, opacity 0.6s;
+    }
+  }
+  & > *.hr {
+    border-bottom: 1px solid var(--frame);
+  }
+  & > * > small {
+    /* position: absolute;
+    right: 1em; */
+    float: right;
+    color: var(--frame);
+  }
+  & > label.header,
+  & > .header > label {
+    text-align: center;
+    white-space: nowrap;
+    & > * {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      line-height: 1em;
+      display: block;
+      padding: 0.2em 1em;
+    }
+  }
+  & > .footer {
+    padding-top: 0.4em;
+    &:hover::before {
+      top: -0.6em;
+      height: calc(100% + 0.6em);
+    }
+    border-bottom: 1px solid var(--frame);
+  }
+}
+
+/* #endregion */
