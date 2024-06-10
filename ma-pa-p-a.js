@@ -321,7 +321,7 @@ export class App extends EventTarget {
     }
   }
 
-  clearCache() {
+  clearAll() {
     this.palettes = {};
     this.thiNum = 0;
     this.archives = {};
@@ -353,12 +353,12 @@ export class App extends EventTarget {
   }
 
   dump() {
-    const layouts = [,];
+    const layers = [,];
     const palettes = Array.from(this.iterPalettes(this.sortedPalettes()));
     const colors = palettes.flatMap(({ color }) => parseRGBA(color));
-    const plte = new Uint8ClampedArray(colors.length * layouts.length);
+    const plte = new Uint8ClampedArray(colors.length * layers.length);
     let offset = 0;
-    for (const _layout of layouts) {
+    for (const _layer of layers) {
       for (const color of colors) {
         plte[offset++] = color;
       }
@@ -367,19 +367,25 @@ export class App extends EventTarget {
       .toString(16)
       .padStart(6, "0");
     const width = palettes.length;
-    const height = layouts.length;
+    const height = layers.length;
+    const dumpPalettes = () => {
+      this.request("dumpPalettes", {
+        name: `mppa-${salt}_${width}x${height}.plte`,
+        plte,
+        width,
+        height,
+        trans: [plte.buffer],
+      });
+    };
+    const dumpArchives = () => {
+      // TODO
+    };
     return {
-      palettes: () => {
-        this.request("dumpPalettes", {
-          name: `mppa-${salt}_${width}x${height}.plte`,
-          plte,
-          width,
-          height,
-          trans: [plte.buffer],
-        });
-      },
-      archives: () => {
-        // TODO
+      palettes: dumpPalettes,
+      archives: dumpArchives,
+      exportAll: () => {
+        dumpPalettes();
+        dumpArchives();
       },
     };
   }
@@ -472,27 +478,33 @@ class WorkerService {
   }
 }
 
-class Dialog {
-  /** @type {(($dialog: HTMLDivElement, event: MouseEvent) => void)[] | undefined} */
+class Dialog extends EventTarget {
+  /**
+   * @typedef {{
+   *   html: () => string,
+   *   show: undefined | ($dialog: HTMLDivElement) => void,
+   *   actions: undefined | {[id: string]: ($dialog: HTMLDivElement) => void},
+   * }} Content
+   */
+  /** @type {Content["actions"]} */
   _actions = undefined;
+  dblclick = window.matchMedia("(pointer: coarse)").matches;
 
   constructor() {
+    super();
     this.$dialog = document.createElement("div");
     this.$dialog.classList.add("dialog");
     this.$dialog.addEventListener("click", (event) => {
       if (this._actions == null) return;
       if (event.target === event.currentTarget) return;
       if (!(event.target instanceof HTMLElement)) return;
-      if (!event.target.id.startsWith("act")) return;
+      const { id } = event.target;
+      const action = this._actions[id];
+      if (action == null) return;
       event.preventDefault();
       event.stopPropagation();
-
-      const index = Number.parseInt(event.target.id.slice(3));
-      const action = this._actions[index];
-      if (action != null) {
-        action(event.currentTarget, event);
-        this.hide();
-      }
+      action(event.currentTarget);
+      this.hide();
     });
     this.$dialog.addEventListener("contextmenu", (event) => {
       event.preventDefault();
@@ -501,43 +513,32 @@ class Dialog {
   }
 
   /**
-   * @typedef {{
-   *   html: () => string,
-   *   show: undefined | ($dialog: HTMLDivElement) => void,
-   *   actions: undefined | (($dialog: HTMLDivElement, event: MouseEvent) => void)[],
-   * }} Content
-   */
-
-  /**
    * show dialog.
    *
-   * @param {string[]} items
+   * @param {{[id: string]: string}} items .
    * @param {Content} content .
    */
   show(items, { html, show, actions }) {
-    this.$dialog.innerHTML = `${html()}${items
-      .map((label, index) => this.menuItem(label, index))
+    this.$dialog.innerHTML = `${html()}${Object.entries(items)
+      .map(this.menuItem)
       .join("")}`;
     if (show != null) show(this.$dialog);
     this._actions = actions;
     this.$dialog.classList.remove("fade-out");
-    this.$dialog.dispatchEvent(new CustomEvent("dialogShow"));
+    this.dispatchEvent(new CustomEvent("show"));
   }
 
   hide() {
     this.$dialog.innerHTML = "";
-    this.$dialog.dispatchEvent(new CustomEvent("dialogHide"));
+    this.dispatchEvent(new CustomEvent("hide"));
     this.$dialog.classList.add("fade-out");
   }
-
-  static bindingNames = ["", "altKey", "shiftKey", "ctrlKey"];
-  static hotkeyPrefixes = ["Click", "Alt+Click", "Shift+Click", "Ctrl+Click"];
 
   /**
    * bind listeners.
    *
    * @param {HTMLAnchorElement} $trigger .
-   * @param {string[]} items .
+   * @param {{[id: string]: string}} items .
    * @param {(event: MouseEvent) => Content | undefined} handler .
    */
   listen($trigger, items, handler) {
@@ -565,7 +566,7 @@ class Dialog {
       event.stopPropagation();
       const content = handler(event);
       if (content == null) return;
-      if (clickAt.t !== undefined) {
+      if (this.dblclick && clickAt.t !== undefined) {
         const move =
           Math.pow(event.x - clickAt.x, 2) + Math.pow(event.y - clickAt.y, 2);
         clearTimer();
@@ -578,24 +579,28 @@ class Dialog {
       // else
       clearTimer();
 
-      for (let i = Dialog.bindingNames.length - 1; i >= 0; i--) {
-        const key = Dialog.bindingNames[i];
-        const action = content.actions[i];
-        if (key && event[key] && action != null) {
-          action(this.$dialog, event);
-          return;
-        }
+      for (const id in Dialog.hotkeys) {
+        if (event[`${id}Key`] !== true) continue;
+        const action = content.actions[id];
+        if (action) action(this.$dialog);
+        return;
       }
-      const click = content.actions[0];
+      const click = content.actions["click"];
       if (click == null) {
         this.show(items, content);
+        return;
+      }
+      if (!this.dblclick) {
+        const show = click(this.$dialog);
+        if (show) this.show(items, content);
         return;
       }
       clickAt.x = event.x;
       clickAt.y = event.y;
       clickAt.t = setTimeout(() => {
         clickAt.t = undefined;
-        click(this.$dialog, event);
+        const show = content.actions.click(this.$dialog);
+        if (show) this.show(items, content);
       }, 200);
     });
   }
@@ -603,50 +608,68 @@ class Dialog {
   /**
    * create menu item.
    *
-   * @param {string} label .
-   * @param {number} index .
-   * @returns {string}
+   * @param {[name: string, label: string]} item .
+   * @returns {string} html
    */
-  menuItem(label, index) {
-    if (label == null) return "";
-    const hotkey = `<small>${Dialog.hotkeyPrefixes[index] ?? ""}</small>`;
-    return `<a id="act${index}" href="javascript:void(0);"><span>${label}</span>${hotkey}</a>`;
+  menuItem([id, label]) {
+    const hotkey =
+      id in Dialog.hotkeys ? `<small>${Dialog.hotkeys[id]}</small>` : "";
+    return `<a id="${id}" href="javascript:void(0);"><span>${label}</span>${hotkey}</a>`;
   }
+
+  static hotkeys = {
+    ctrl: "Ctrl+Click",
+    shift: "Shift+Click",
+    alt: "Alt+Click",
+  };
 
   /** @param {Dialog} dialog . */
   static modal(dialog) {
     const $modal = document.createElement("div");
     $modal.classList.add("modal");
     $modal.appendChild(dialog.$dialog);
-    dialog.$dialog.addEventListener(
-      "dialogShow",
-      ({ currentTarget: { parentElement: $modal } }) => {
+
+    /** @type {number | undefined} */ let timer;
+    dialog.addEventListener(
+      "show",
+      ({
+        currentTarget: {
+          $dialog: { parentElement: $modal },
+        },
+      }) => {
+        if (timer !== undefined) {
+          window.clearTimeout(timer);
+          timer = undefined;
+        }
         $modal.classList.remove("fade-out");
         $modal.classList.add("show");
       }
     );
-    dialog.$dialog.addEventListener(
-      "dialogHide",
-      ({ currentTarget: { parentElement: $modal } }) => {
+    dialog.addEventListener(
+      "hide",
+      ({
+        currentTarget: {
+          $dialog: { parentElement: $modal },
+        },
+      }) => {
+        if (timer !== undefined) return;
         $modal.classList.add("fade-out");
-        setTimeout(() => {
+        timer = window.setTimeout(() => {
+          timer = undefined;
           $modal.classList.remove("fade-out");
           $modal.classList.remove("show");
         }, 300);
       }
     );
-    $modal.addEventListener("mouseup", (event) => {
+    /** @param {MouseEvent} event . */
+    const triggerHide = (event) => {
       if (event.target !== event.currentTarget) return;
       event.preventDefault();
       event.stopPropagation();
       dialog.hide();
-    });
-    $modal.addEventListener("contextmenu", (event) => {
-      if (event.target !== event.currentTarget) return;
-      event.preventDefault();
-      event.stopPropagation();
-      dialog.hide();
-    });
+    };
+    $modal.addEventListener("mouseup", triggerHide);
+    $modal.addEventListener("contextmenu", triggerHide);
     return $modal;
   }
 }
@@ -844,7 +867,7 @@ function createTitlebar(app) {
   );
   app.dialog.listen(
     $colors,
-    ["Toggle", "Exclude", "Focus", "Split"],
+    { ctrl: "Focus", shift: "Toggle", alt: "Exclude" },
     ({ target: $color }) => {
       if (!($color instanceof HTMLAnchorElement)) return;
       const code = $color.id.slice(5);
@@ -852,6 +875,7 @@ function createTitlebar(app) {
       const color = Number.parseInt(hex.slice(1), 16);
       const rgba = parseRGBA(color);
 
+      // TODO
       const html = () => `<div class="titlebar header hr">
         <span class="color tp-grid" style="--color: ${hex};"></span>
         <label>
@@ -918,13 +942,15 @@ function createTitlebar(app) {
         app.flushDirty();
         app.log("info", `color ${focus ? "focused " : "excluded"}: ${code}`);
       };
-      const actions = [
-        toggle,
-        () => highlight(false),
-        () => highlight(true),
-        () => app.splitColor(code),
-      ];
-      return { html, show, actions };
+      return {
+        html,
+        show,
+        actions: {
+          ctrl: () => highlight(true),
+          shift: toggle,
+          alt: () => highlight(false),
+        },
+      };
     }
   );
 
@@ -936,29 +962,34 @@ function createTitlebar(app) {
   $menu.classList.add("icon");
   app.dialog.listen(
     $menu,
-    [
-      undefined, // Show menu
-      undefined, // "Prev layer",
-      undefined, // "Next layer",
-      "Exports",
-      "- Dump palettes",
-      "- Dump archives",
-    ],
+    {
+      ctrl: "Export all",
+      palettes: "- Dump palettes",
+      archives: "- Dump archives",
+      clear: "Clear all",
+    },
     () => {
+      const layers = [, , , , ,]; // TODO
       const html = () => `<label class="header hr">
-        <span>
+        <span title="Prev:    Alt+Click\nNext: Shift+Click">
           <span>Layer:</span>
-          <input type="number" min="0" max="5" value="1">
+          <input id="layer" type="number" min="1" max="${layers.length}" value="1">
           <span>/</span>
           <span class="titlebar layer-num">
             <button id="delete" title="delete layer">-</button>
-            <span>5</span>
+            <span>${layers.length}</span>
             <button id="create" title="create layer">+</button>
           </span>
         </span>
         <small>${app.paletteNum} color in ${app.archiveNum} archive</small>
       </label>`;
-      // TODO
+      /** @param {HTMLDivElement} $dialog . */
+      const show = ($dialog) => {
+        const $input = $dialog.querySelector("input");
+        $input.addEventListener("change", (event) => {
+          app.log("info", `change ${event.target.value}`);
+        });
+      };
       const prevLayer = () => {
         app.log("info", "prev");
       };
@@ -967,22 +998,15 @@ function createTitlebar(app) {
       };
       return {
         html,
-        actions: [
-          undefined, // Show menu
-          prevLayer,
-          nextLayer,
-          () => {
-            const dump = app.dump();
-            dump.palettes();
-            dump.archives();
-          },
-          () => {
-            app.dump().palettes();
-          },
-          () => {
-            app.dump().archives();
-          },
-        ],
+        show,
+        actions: {
+          ctrl: () => app.dump().exportAll(),
+          palettes: () => app.dump().palettes(),
+          archives: () => app.dump().archives(),
+          clear: () => app.clearAll(),
+          shift: nextLayer,
+          alt: prevLayer,
+        },
       };
     }
   );
@@ -1016,43 +1040,163 @@ function createArchives(app) {
     }
   );
 
-  /** @type {[x: number, y: number] | null} */ let selectArea = null;
-  app.dialog.listen(
-    $images,
-    ["Zoom area", "Cut area", "Add area", "Restore"],
-    ({ target: $canvas }) => {
-      if (!($canvas instanceof HTMLCanvasElement)) return;
-      const arch = $canvas.title;
-      const { ctx, chunks } = app.archives[arch];
-      const { width, height } = ctx.canvas;
-      const html = () => `<label class="header hr">
-        <span>${arch}</span>
-        <small>${width}x${height} with ${chunks.length} chunk</small>
-      </label>`;
-      // TODO
-      return {
-        html,
-        actions: [
-          () => {
-            app.log("info", "click");
-          },
-          () => {
-            app.log("info", "alt");
-          },
-          () => {
-            app.log("info", "shift");
-          },
-          () => {
-            app.log("info", "ctrl");
-          },
-        ],
-      };
+  const $selectArea = document.createElement("div");
+  $selectArea.id = "selectArea";
+  const selection = {
+    name: "",
+    posX: 0,
+    posY: 0,
+    topY: 0,
+    type: "",
+    /** @type {import("./types").Rect | null} */
+    rect: null,
+  };
+  /** @param {MouseEvent | TouchEvent} event . */
+  function drawArea(event, create = false) {
+    if (!event.cancelable) {
+      // scrolling
+      $selectArea.classList.remove("show");
+      selection.name = "";
+      return;
     }
-  );
+    const $canvas = event.target;
+    if (!($canvas instanceof HTMLCanvasElement)) return selection.rect;
+    const mouse = event instanceof TouchEvent ? event.touches[0] : event;
+    if (mouse == null) return selection.rect;
+    const { left, top } = $canvas.parentElement.getBoundingClientRect();
+    const { scrollTop } = $canvas.parentElement.parentElement;
+    const { clientX, clientY } = mouse;
+
+    if (selection.name !== $canvas.title) {
+      if (!create) return null;
+      selection.name = $canvas.title;
+      selection.posX = clientX;
+      selection.posY = clientY;
+      selection.topY = scrollTop;
+      $selectArea.style.left = `${clientX - left}px`;
+      $selectArea.style.top = `${clientY - top}px`;
+      $selectArea.style.width = `0px`;
+      $selectArea.style.height = `0px`;
+      $selectArea.classList.add("show");
+      return (selection.rect = null);
+    }
+    if (event instanceof TouchEvent && event.touches.length >= 2) {
+      event.preventDefault();
+      event.stopPropagation();
+      const { clientX: posX, clientY: posY } =
+        event.touches[event.touches.length - 1];
+      selection.posX = posX;
+      selection.posY = posY;
+    }
+    const { posX, posY: _posY, topY } = selection;
+    const posY = _posY + topY - scrollTop;
+    const [x, endX] = clientX < posX ? [clientX, posX] : [posX, clientX];
+    const [y, endY] = clientY < posY ? [clientY, posY] : [posY, clientY];
+    const w = endX - x;
+    const h = endY - y;
+    $selectArea.style.left = `${x - left}px`;
+    $selectArea.style.top = `${y - top}px`;
+    $selectArea.style.width = `${w}px`;
+    $selectArea.style.height = `${h}px`;
+    return (selection.rect = [x, y, w, h]);
+  }
+  $images.addEventListener("mousemove", drawArea);
+  $images.addEventListener("mouseout", drawArea);
+
+  /**
+   * submit area.
+   *
+   * @param {string} arch .
+   * @param {string} type .
+   * @param {import("./types").Rect} rect .
+   */
+  function submitArea(arch, type, rect) {
+    $selectArea.classList.remove("show");
+    selection.name = selection.type = "";
+    selection.rect = null;
+    // TODO
+    app.log(
+      "info",
+      `submit area, ${arch} - ${type}: ${rect.map((i) => i.toFixed(0))}`
+    );
+  }
+  const menuItems = {
+    ctrl: "Zoom area",
+    shift: "Split area",
+    alt: "Erase area",
+  };
+  /** @param {MouseEvent | TouchEvent} event . */
+  const menuHandler = (event) => {
+    const arch =
+      event.target instanceof HTMLCanvasElement
+        ? event.target.title
+        : selection.name;
+    if (!arch) return;
+    const { ctx, chunks } = app.archives[arch];
+    const { width, height } = ctx.canvas;
+    const html = () => `<label class="header hr">
+      <span>${arch}</span>
+      <small>${width}x${height} with ${chunks.length} chunk</small>
+    </label>`;
+
+    const rect = drawArea(event);
+    /** @param {string} type . */
+    function selectType(type) {
+      if (rect == null) selection.type = type;
+      else submitArea(arch, type, rect);
+    }
+    return {
+      html,
+      show: () => {
+        // $selectArea.classList.remove("show");
+        selection.name = selection.type = "";
+        selection.rect = null;
+      },
+      actions: {
+        ctrl: () => selectType("zoom"),
+        shift: () => selectType("split"),
+        alt: () => selectType("erase"),
+        click: () => {
+          if (rect == null) return;
+          const { name, type } = selection;
+          if (type) {
+            submitArea(name, type, rect);
+            return;
+          }
+          return /* show menu */ true;
+        },
+      },
+    };
+  };
+
+  $images.addEventListener("touchstart", (event) => drawArea(event, true));
+  $images.addEventListener("touchmove", (event) => drawArea(event));
+  $images.addEventListener("touchend", (event) => {
+    if (!event.cancelable) return;
+    if (event.touches.length > 0) {
+      const { clientX: posX, clientY: posY } =
+        event.changedTouches[event.changedTouches.length - 1];
+      selection.posX = posX;
+      selection.posY = posY;
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    const content = menuHandler(event);
+    if (content != null) app.dialog.show(menuItems, content);
+  });
+  $images.addEventListener("mousedown", (event) => {
+    if (event.buttons === 1) drawArea(event, true);
+  });
+  app.dialog.listen($images, menuItems, menuHandler);
+  app.dialog.addEventListener("hide", () => {
+    $selectArea.classList.remove("show");
+  });
 
   const $panel = document.createElement("div");
   $panel.id = "archives";
   $panel.appendChild($images);
+  $panel.appendChild($selectArea);
   return $panel;
 }
 
