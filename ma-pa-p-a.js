@@ -10,7 +10,9 @@
 
 /** Magic Palette for Pixel Arts Application */
 export class App extends EventTarget {
-  /** @type {{[code: string]: Palette | { count: number, split: Palette[] }}} */
+  layer = 0;
+  layerNum = 1;
+  /** @type {{[code: string]: Palette | { color: number, count: number, split: Palette[] }}} */
   palettes = {};
   paletteNum = 0;
   /** @type {{[name: string]: Archive}} */
@@ -82,6 +84,7 @@ export class App extends EventTarget {
     },
 
     updateChunk: ({ arch, chunk, data, plte, trans: [output] }) => {
+      this.dirtyBusy--;
       const { ctx, chunks } = this.archives[arch];
       const { rect } = chunks[chunk];
       chunks[chunk] = { rect, texture: { data, plte } };
@@ -99,15 +102,29 @@ export class App extends EventTarget {
 
   //#region palette operate
 
+  /** @type {"count" | "color"} */
+  sortBy = "count";
+
   sortedPalettes() {
-    return Object.values(this.palettes).sort(
-      ({ count: count1 }, { count: count2 }) => {
-        return count1 > count2 ? -1 : count1 < count2 ? 1 : 0;
+    /** @type {(palette: Palette) => number[]} */
+    const sortKeys =
+      this.sortBy === "count"
+        ? ({ count, color }) => [-count, color]
+        : ({ color }) => transToHsl(...parseRGBA(color));
+    return Object.values(this.palettes).sort((palette1, palette2) => {
+      const keys1 = sortKeys(palette1);
+      const keys2 = sortKeys(palette2);
+      for (let i = 0; i < keys1.length; i++) {
+        const key1 = keys1[0];
+        const key2 = keys2[0];
+        if (key1 < key2) return -1;
+        else if (key1 > key2) return 1;
       }
-    );
+      return 0;
+    });
   }
 
-  /** @param {(Palette | { count: number, split: Palette[] })[]} palettes . */
+  /** @param {(Palette | { color: number, count: number, split: Palette[] })[]} palettes . */
   *iterPalettes(palettes) {
     for (const palette of palettes) {
       if ("code" in palette) yield palette;
@@ -116,14 +133,24 @@ export class App extends EventTarget {
   }
 
   /** @type {{[arch: string]: Set<number> }} */ dirtyChunks = {};
+  dirtyBusy = 0;
+  checkBusy() {
+    if (this.dirtyBusy > 0) {
+      this.log("warn", "the service is busy");
+      return true;
+    }
+    return false;
+  }
 
   flushDirty() {
+    if (this.dirtyBusy > 0) return;
     for (const [arch, chunks] of Object.entries(this.dirtyChunks)) {
       const archives = this.archives[arch];
       for (const chunk of chunks) {
         const { rect, texture } = archives.chunks[chunk];
         if (texture == null) continue;
         const { data, plte } = texture;
+        this.dirtyBusy++;
         this.request("updateChunk", {
           arch,
           chunk,
@@ -148,7 +175,7 @@ export class App extends EventTarget {
    */
   getPalette(code) {
     if (code.length === 8) return this.palettes[code];
-    /** @type {{count: number, split: Palette[]}} */
+    /** @type {{color: number, count: number, split: Palette[]}} */
     const parent = this.palettes[code.slice(0, 8)];
     const i = Number.parseInt(code.slice(8), 16);
     return parent.split[i];
@@ -165,20 +192,22 @@ export class App extends EventTarget {
         color,
         count: 0,
         refer: {},
+        layers: [],
       });
     }
     if ("code" in palette) {
-      if (palette.dirty === undefined) return palette;
+      if (palette.layers[this.layer] === undefined) return palette;
       palette.code = `${code}00`;
-      this.palettes[code] = { count: palette.count, split: [palette] };
+      this.palettes[code] = { color, count: palette.count, split: [palette] };
     }
-    /** @type {{count: number, split: Palette[]}} */
+    /** @type {{color: number, count: number, split: Palette[]}} */
     const parent = this.palettes[code];
     for (const palette of parent.split) {
-      if (palette.dirty === undefined) return palette;
+      if (palette.layers[this.layer] === undefined) return palette;
     }
     this.paletteNum++;
     let count = 0;
+    /** @type {Palette} */
     const children = {
       code: `${code}${parent.split.length
         .toString(16)
@@ -189,41 +218,32 @@ export class App extends EventTarget {
         return count;
       },
       set count(value) {
+        const diff = value - count;
         count = value;
-        parent.count += value;
+        parent.count += diff;
       },
       refer: {},
+      layers: [],
     };
     parent.split.push(children);
     return children;
   }
 
-  /** @param {string} code . */
-  splitColor(code) {
-    if (code.length > 8) {
-      this.splitColor(code.slice(0, 8));
-      return;
-    }
-    /** @type {Palette} */
-    const palette = this.palettes[code];
-    if (palette == null) return;
-    this.log("info", "TODO split color", code, palette);
+  /**
+   * merge palette color.
+   *
+   * @param {number} code .
+   * @param {number} from .
+   */
+  mergeColor(code, from) {
+    if (code === from) return;
+    // TODO
+    this.log("info", `code: ${code}, from: ${from}`);
   }
 
-  /**
-   * update color.
-   *
-   * @param {string} code .
-   * @param {number} color .
-   */
-  updateColor(code, color) {
-    const palette = this.getPalette(code);
-    if (palette == null) return;
-    const dirty = color === palette.color ? undefined : color;
-    if (dirty === palette.dirty) return;
-    palette.dirty = dirty;
+  /** @param {Palette} palette . @param {number} color . */
+  _setColor(palette, color) {
     const rgba = parseRGBA(color);
-
     for (const [arch, refer] of Object.entries(palette.refer)) {
       const chunks =
         this.dirtyChunks[arch] ?? (this.dirtyChunks[arch] = new Set());
@@ -235,6 +255,77 @@ export class App extends EventTarget {
         const { plte } = texture;
         plte.set(rgba, offset);
       }
+    }
+  }
+
+  /**
+   * update color.
+   *
+   * @param {string} code .
+   * @param {number} color .
+   */
+  updateColor(code, color) {
+    if (this.dirtyBusy > 0) return;
+    const palette = this.getPalette(code);
+    if (palette == null) return;
+    const dirty = color === palette.color ? undefined : color;
+    if (dirty === palette.layers[this.layer]) return;
+    palette.layers[this.layer] = dirty;
+    this._setColor(palette, color);
+  }
+  /** @param {string} code . */
+  restoreColor(code) {
+    if (this.dirtyBusy > 0) return;
+    const palette = this.getPalette(code);
+    if (palette == null) return;
+    if (palette.layers[this.layer] === undefined) return;
+    palette.layers[this.layer] = undefined;
+    this._setColor(palette, palette.color);
+  }
+
+  /** @param {number} layer . */
+  switchLayer(layer) {
+    if (this.dirtyBusy > 0) return;
+    if (layer === this.layer) return;
+    const old = this.layer;
+    if (layer < 0) this.layer = this.layerNum - 1;
+    else if (layer >= this.layerNum) this.layer = 0;
+    else this.layer = layer;
+
+    const palettes = Object.values(this.palettes);
+    for (const palette of this.iterPalettes(palettes)) {
+      const dirty = palette.layers[this.layer];
+      if (dirty === palette.layers[old]) continue;
+      this._setColor(palette, dirty ?? palette.color);
+    }
+  }
+
+  appendLayer() {
+    // if (this.dirtyBusy > 0) return;
+    const layer = this.layer;
+    this.layer = this.layerNum++;
+
+    const palettes = Object.values(this.palettes);
+    for (const palette of this.iterPalettes(palettes)) {
+      // clone current layer dirty color.
+      const dirty = palette.layers[layer];
+      palette.layers[this.layer] = dirty;
+    }
+  }
+
+  removeLayer() {
+    if (this.dirtyBusy > 0) return;
+    const layer = this.layer;
+    if (this.layerNum > 1) this.layerNum--;
+    if (this.layer >= this.layerNum) this.layer = this.layerNum - 1;
+
+    const palettes = Object.values(this.palettes);
+    for (const palette of this.iterPalettes(palettes)) {
+      // remove current layer dirty color.
+      const remove = palette.layers.splice(layer, 1);
+      const dirty = palette.layers[this.layer];
+      if (remove === dirty) continue;
+      this._setColor(palette, dirty ?? palette.color);
     }
   }
 
@@ -323,9 +414,9 @@ export class App extends EventTarget {
 
   clearAll() {
     this.palettes = {};
-    this.thiNum = 0;
+    this.paletteNum = 0;
     this.archives = {};
-    this.thiNum = 0;
+    this.archiveNum = 0;
     this.dispatchEvent(new CustomEvent("clear"));
   }
 
@@ -345,7 +436,7 @@ export class App extends EventTarget {
    *
    * @param {LogLevel} level .
    * @param {string} message .
-   * @param {...object[]} [payload] .
+   * @param {...object} [varargs] .
    */
   log(level, message, ...varargs) {
     console[level](`[ma-pa-p-a] ${message}`, ...varargs);
@@ -353,21 +444,34 @@ export class App extends EventTarget {
   }
 
   dump() {
-    const layers = [,];
     const palettes = Array.from(this.iterPalettes(this.sortedPalettes()));
     const colors = palettes.flatMap(({ color }) => parseRGBA(color));
-    const plte = new Uint8ClampedArray(colors.length * layers.length);
-    let offset = 0;
-    for (const _layer of layers) {
-      for (const color of colors) {
-        plte[offset++] = color;
+    const rowSize = colors.length;
+    let length = rowSize;
+    for (let j = 0; j < this.layerNum; j++) {
+      let regress = true;
+      for (let i = 0; i < palettes.length; i++) {
+        const dirty = palettes[i].layers[j];
+        if (dirty === undefined) {
+          let position = i << 2;
+          for (let offset = 0; offset < 4; offset++) {
+            colors[length++] = colors[position + offset];
+          }
+        } else {
+          regress = false;
+          for (const value of parseRGBA(dirty)) {
+            colors[length++] = value;
+          }
+        }
       }
+      if (regress) length -= rowSize;
     }
+    const plte = new Uint8ClampedArray(colors.slice(0, length));
+    const width = palettes.length;
+    const height = plte.length / width / 4;
     const salt = (new Date().getTime() & 0xffffff)
       .toString(16)
       .padStart(6, "0");
-    const width = palettes.length;
-    const height = layers.length;
     const dumpPalettes = () => {
       this.request("dumpPalettes", {
         name: `mppa-${salt}_${width}x${height}.plte`,
@@ -497,7 +601,14 @@ class Dialog extends EventTarget {
     this.$dialog.addEventListener("click", (event) => {
       if (this._actions == null) return;
       if (event.target === event.currentTarget) return;
-      if (!(event.target instanceof HTMLElement)) return;
+      if (
+        !(
+          event.target instanceof HTMLAnchorElement ||
+          event.target instanceof HTMLButtonElement
+        )
+      ) {
+        return;
+      }
       const { id } = event.target;
       const action = this._actions[id];
       if (action == null) return;
@@ -515,7 +626,7 @@ class Dialog extends EventTarget {
   /**
    * show dialog.
    *
-   * @param {{[id: string]: string}} items .
+   * @param {{[id: string]: string | () => string}} items .
    * @param {Content} content .
    */
   show(items, { html, show, actions }) {
@@ -538,7 +649,7 @@ class Dialog extends EventTarget {
    * bind listeners.
    *
    * @param {HTMLAnchorElement} $trigger .
-   * @param {{[id: string]: string}} items .
+   * @param {{[id: string]: string | () => string}} items .
    * @param {(event: MouseEvent) => Content | undefined} handler .
    */
   listen($trigger, items, handler) {
@@ -608,19 +719,21 @@ class Dialog extends EventTarget {
   /**
    * create menu item.
    *
-   * @param {[name: string, label: string]} item .
+   * @param {[name: string, label: string | () => string]} item .
    * @returns {string} html
    */
-  menuItem([id, label]) {
+  menuItem([id, fn]) {
+    const label = fn instanceof Function ? fn() : fn;
+    if (!label) return "";
     const hotkey =
       id in Dialog.hotkeys ? `<small>${Dialog.hotkeys[id]}</small>` : "";
     return `<a id="${id}" href="javascript:void(0);"><span>${label}</span>${hotkey}</a>`;
   }
 
   static hotkeys = {
-    ctrl: "Ctrl+Click",
-    shift: "Shift+Click",
-    alt: "Alt+Click",
+    ctrl: "⌃ Ctrl + Click",
+    shift: "⇧ Shift + Click",
+    alt: "⌥ Alt + Click",
   };
 
   /** @param {Dialog} dialog . */
@@ -688,6 +801,29 @@ function parseRGBA(color) {
   const r = value & 0xff;
   return [r, g, b, a];
 }
+/** @param {number} r . @param {number} g . @param {number} b . @param {number} a . */
+function transToHsl(r, g, b, a) {
+  r /= 255;
+  g /= 255;
+  b /= 255;
+  const alpha = (100 * a) / 255;
+
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  const diff = max - min;
+  const lightness = 50 * (max + min);
+  if (diff === 0) return [0, 0, lightness, alpha];
+  const saturation =
+    100 * (lightness > 50 ? diff / (2 - max - min) : diff / (max + min));
+  const hue =
+    max === r
+      ? (60 * (g - b)) / diff + (g < b ? 360 : 0)
+      : max === g
+      ? (60 * (b - r)) / diff + 120
+      : /* max === b */
+        (60 * (r - g)) / diff + 240;
+  return [hue, saturation, lightness, alpha];
+}
 
 /**
  * dump file.
@@ -743,11 +879,18 @@ function listenUpload(app, $root) {
     event.stopPropagation();
     target = event.target;
     const isFile = event.dataTransfer.types.some((type) => type === "Files");
-    if (isFile) event.currentTarget.classList.add("dragover");
+    if (isFile) {
+      event.dataTransfer.dropEffect = "copy";
+      event.currentTarget.classList.add("dragover");
+    } else {
+      event.dataTransfer.dropEffect = "none";
+    }
   });
   $root.addEventListener("dragover", (event) => {
     event.preventDefault();
     event.stopPropagation();
+    const isFile = event.dataTransfer.types.some((type) => type === "Files");
+    event.dataTransfer.dropEffect = isFile ? "copy" : "none";
   });
   $root.addEventListener("dragleave", (event) => {
     event.preventDefault();
@@ -790,11 +933,12 @@ function fetchAndParse(app, query) {
 /**
  * create palette color element.
  *
+ * @param {number} layer .
  * @param {number} index .
  * @param {Palette} palette .
  * @returns {HTMLAnchorElement} .
  */
-function paletteColor(index, { code, color, count, dirty }) {
+function paletteColor(layer, index, { code, color, count, layers }) {
   const $color = document.createElement("a");
   $color.id = `color${code}`;
   $color.title = `${index}. ${code}: ${
@@ -805,6 +949,7 @@ function paletteColor(index, { code, color, count, dirty }) {
       : `${(count / 1000000).toFixed(2)}M`
   }`;
   $color.innerHTML = `<span/>`;
+  const dirty = layers[layer];
   const rgba = dirty || color;
   if ((rgba & 0xff) < 0xff) {
     $color.classList.add("tp-grid");
@@ -843,6 +988,39 @@ function createTitlebar(app) {
 
   const $colors = document.createElement("div");
   $colors.classList.add("colors", "hide");
+  $colors.draggable = true;
+  $colors.addEventListener("dragstart", (event) => {
+    if (!(event.target instanceof HTMLAnchorElement)) return;
+    const code = event.target.id.slice(5);
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", code);
+    event.currentTarget.setAttribute("merge-color", code);
+  });
+  $colors.addEventListener("drop", (event) => {
+    if (!(event.target instanceof HTMLAnchorElement)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const code = event.target.id.slice(5);
+    const from = event.dataTransfer.getData("text/plain");
+    event.currentTarget.removeAttribute("merge-color", code);
+    if (app.checkBusy()) return;
+    app.mergeColor(code, from);
+    app.flushDirty();
+  });
+  /** @param {DragEvent} event . */
+  function dragover(event) {
+    if (!(event.target instanceof HTMLAnchorElement)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    event.dataTransfer.dropEffect = "move";
+  }
+  $colors.addEventListener("dragover", dragover);
+  $colors.addEventListener("dragenter", dragover);
+  $colors.addEventListener("dragend", (event) => {
+    if (!(event.target instanceof HTMLAnchorElement)) return;
+    event.currentTarget.removeAttribute("merge-color");
+  });
+
   app.addEventListener("clear", () => {
     $upload.classList.remove("hide");
     $colors.innerHTML = "";
@@ -851,12 +1029,14 @@ function createTitlebar(app) {
   app.addEventListener(
     "updatePalette",
     /** @param {CustomEvent<Iterable<Palette>>} event . */ ({
+      currentTarget,
       detail: palettes,
     }) => {
+      const { layer } = currentTarget;
       $colors.innerHTML = "";
       let i = 0;
       for (const palette of palettes) {
-        const $color = paletteColor(++i, palette);
+        const $color = paletteColor(layer, ++i, palette);
         $colors.appendChild($color);
       }
       if (i > 0) {
@@ -867,20 +1047,30 @@ function createTitlebar(app) {
   );
   app.dialog.listen(
     $colors,
-    { ctrl: "Focus", shift: "Toggle", alt: "Exclude" },
+    {
+      ctrl: "Focus",
+      shift: "Toggle",
+      alt: "Exclude",
+      merge: () =>
+        $colors.hasAttribute("merge-color")
+          ? "Merge selected"
+          : "Select to merge",
+      restore: "Restore",
+    },
     ({ target: $color }) => {
       if (!($color instanceof HTMLAnchorElement)) return;
       const code = $color.id.slice(5);
       const hex = $color.style.getPropertyValue("--color");
       const color = Number.parseInt(hex.slice(1), 16);
-      const rgba = parseRGBA(color);
+      const [r, g, b, a] = parseRGBA(color);
+      const [h, s, l, alpha] = transToHsl(r, g, b, a).map(Math.round);
 
-      // TODO
       const html = () => `<div class="titlebar header hr">
         <span class="color tp-grid" style="--color: ${hex};"></span>
         <label>
           <span>${$color.title}</span>
-          <small>rgba(${rgba.join(", ")})</small>
+          <small>rgb(${r} ${g} ${b} / ${a})</small>
+          <small>hsl(${h}deg ${s}% ${l}% / ${alpha}%)</small>
         </label>
       </div>
       <div id="colorPicker">
@@ -889,47 +1079,54 @@ function createTitlebar(app) {
           <pre>${hex.slice(0, 7)}</pre>
         </label>
         <label id="alpha">
-          <input type="range" min="0" max="255" value="${rgba[3]}" />
-          <pre>A: ${rgba[3]}</pre>
+          <input type="range" min="0" max="255" value="${a}" />
+          <pre>A: ${a}</pre>
         </label>
       </div>
-      <a id="submit" class="footer" href="javascript:void(0);">Submit</a>`;
+      <a id="submit" class="footer fold" href="javascript:void(0);">Submit</a>`;
 
       /** @param {HTMLDivElement} $dialog . */
       const show = ($dialog) => {
         const $rgb = $dialog.querySelector("label#rgb>input");
+        const $alpha = $dialog.querySelector("label#alpha>input");
+        const $submit = $dialog.querySelector("#submit");
+        let dirty = color;
+        const onInput = () => {
+          const rgb = Number.parseInt($rgb.value.slice(1), 16);
+          const alpha = Number.parseInt($alpha.value);
+          dirty = rgb * 256 + alpha;
+          if (dirty !== color) $submit.classList.remove("fold");
+        };
         $rgb.addEventListener("input", (event) => {
           const value = event.currentTarget.value;
           $dialog.querySelector("label#rgb>pre").innerHTML = value;
+          onInput();
         });
-        const $alpha = $dialog.querySelector("label#alpha>input");
         $alpha.addEventListener("input", (event) => {
           const value = event.currentTarget.value;
           const text = `A: ${value.padStart(3, " ")}`;
           $dialog.querySelector("label#alpha>pre").innerHTML = text;
+          onInput();
         });
-        const $submit = $dialog.querySelector("#submit");
         $submit.addEventListener("click", () => {
+          if (app.checkBusy()) return;
           app.dialog.hide();
-          const rgb = Number.parseInt($rgb.value.slice(1), 16);
-          const alpha = Number.parseInt($alpha.value);
-          const color = rgb * 256 + alpha;
-          app.updateColor(code, color);
+          app.updateColor(code, dirty);
           app.flushDirty();
-          app.log(
-            "info",
-            `color updated, code: ${code}, color: #${color.toString(16)}`
-          );
+          const hex = `#${dirty.toString(16)}`;
+          app.log("info", `color updated, code: ${code}, color: ${hex}`);
         });
       };
 
       const toggle = () => {
+        if (app.checkBusy()) return;
         const disable = !$color.classList.contains("cross-out");
         app.updateColor(code, disable ? 0x00000000 : color);
         app.flushDirty();
         app.log("info", `color ${disable ? "disabled" : "enabled "}: ${code}`);
       };
       const highlight = (focus) => {
+        if (app.checkBusy()) return;
         for (const $color of $colors.children) {
           if (!($color instanceof HTMLAnchorElement)) continue;
           if (!$color.id.startsWith("color")) continue;
@@ -942,6 +1139,12 @@ function createTitlebar(app) {
         app.flushDirty();
         app.log("info", `color ${focus ? "focused " : "excluded"}: ${code}`);
       };
+      const restore = () => {
+        if (app.checkBusy()) return;
+        app.restoreColor(code);
+        app.flushDirty();
+        app.log("info", `color restored: ${code}`);
+      };
       return {
         html,
         show,
@@ -949,6 +1152,18 @@ function createTitlebar(app) {
           ctrl: () => highlight(true),
           shift: toggle,
           alt: () => highlight(false),
+          restore,
+          merge: () => {
+            const from = $color.parentElement.getAttribute("merge-color");
+            if (from == null) {
+              $color.parentElement.setAttribute("merge-color", code);
+            } else {
+              $color.parentElement.removeAttribute("merge-color");
+              if (app.checkBusy()) return;
+              app.mergeColor(code, from);
+              app.flushDirty();
+            }
+          },
         },
       };
     }
@@ -966,35 +1181,50 @@ function createTitlebar(app) {
       ctrl: "Export all",
       palettes: "- Dump palettes",
       archives: "- Dump archives",
+      // sort: () =>
+      //   app.sortBy === "count" ? "Sort by rainbow" : "Sort by pixel count",
       clear: "Clear all",
     },
     () => {
-      const layers = [, , , , ,]; // TODO
-      const html = () => `<label class="header hr">
-        <span title="Prev:    Alt+Click\nNext: Shift+Click">
+      const html = () => `<label class="header">
+        <span title="Prev:   ⌥ Alt + Click\nNext: ⇧ Shift + Click">
           <span>Layer:</span>
-          <input id="layer" type="number" min="1" max="${layers.length}" value="1">
+          <input id="layer" type="number" min="1"
+            max="${app.layerNum}" value="${1 + app.layer}">
           <span>/</span>
           <span class="titlebar layer-num">
-            <button id="delete" title="delete layer">-</button>
-            <span>${layers.length}</span>
-            <button id="create" title="create layer">+</button>
+            <button id="remove" title="Remove layer">-</button>
+            <span>${app.layerNum}</span>
+            <button id="append" title="Append layer">+</button>
           </span>
         </span>
         <small>${app.paletteNum} color in ${app.archiveNum} archive</small>
-      </label>`;
+      </label><a id="submit" class="footer fold">Switch layer</a>`;
+
+      const switchLayer = (layer) => {
+        if (app.checkBusy()) return;
+        app.switchLayer(layer);
+        app.flushDirty();
+        app.log("info", `switch to layer ${1 + app.layer}`);
+      };
       /** @param {HTMLDivElement} $dialog . */
       const show = ($dialog) => {
-        const $input = $dialog.querySelector("input");
-        $input.addEventListener("change", (event) => {
-          app.log("info", `change ${event.target.value}`);
+        const $input = $dialog.querySelector("input#layer");
+        const $submit = $dialog.querySelector("#submit");
+        let layer = app.layer;
+        $input.addEventListener("input", ({ currentTarget }) => {
+          const value = Number.parseInt(currentTarget.value.trim() || "0");
+          if (value <= 0 || value > app.layerNum) {
+            layer = app.layer;
+          } else {
+            layer = value - 1;
+            if (layer !== app.layer) $submit.classList.remove("fold");
+          }
         });
-      };
-      const prevLayer = () => {
-        app.log("info", "prev");
-      };
-      const nextLayer = () => {
-        app.log("info", "next");
+        $submit.addEventListener("click", () => {
+          app.dialog.hide();
+          switchLayer(layer);
+        });
       };
       return {
         html,
@@ -1003,9 +1233,25 @@ function createTitlebar(app) {
           ctrl: () => app.dump().exportAll(),
           palettes: () => app.dump().palettes(),
           archives: () => app.dump().archives(),
+          shift: () => switchLayer(app.layer + 1),
+          alt: () => switchLayer(app.layer - 1),
+          append: () => {
+            // if (app.checkBusy()) return;
+            app.appendLayer();
+            // app.flushDirty();
+            app.log("info", `append layer at ${1 + app.layer}`);
+          },
+          remove: () => {
+            if (app.checkBusy()) return;
+            app.removeLayer();
+            app.flushDirty();
+            app.log("info", `remove layer at ${1 + app.layer}`);
+          },
           clear: () => app.clearAll(),
-          shift: nextLayer,
-          alt: prevLayer,
+          sort: () => {
+            app.sortBy = app.sortBy === "count" ? "color" : "count";
+            app.flushDirty();
+          },
         },
       };
     }
@@ -1048,6 +1294,7 @@ function createArchives(app) {
     posY: 0,
     topY: 0,
     type: "",
+    time: 0,
     /** @type {import("./types").Rect | null} */
     rect: null,
   };
@@ -1073,6 +1320,7 @@ function createArchives(app) {
       selection.posX = clientX;
       selection.posY = clientY;
       selection.topY = scrollTop;
+      selection.time = performance.now();
       $selectArea.style.left = `${clientX - left}px`;
       $selectArea.style.top = `${clientY - top}px`;
       $selectArea.style.width = `0px`;
@@ -1139,7 +1387,8 @@ function createArchives(app) {
       <small>${width}x${height} with ${chunks.length} chunk</small>
     </label>`;
 
-    const rect = drawArea(event);
+    const pass = performance.now() - selection.time;
+    const rect = pass < 300 ? null : drawArea(event);
     /** @param {string} type . */
     function selectType(type) {
       if (rect == null) selection.type = type;
@@ -1183,7 +1432,10 @@ function createArchives(app) {
     event.preventDefault();
     event.stopPropagation();
     const content = menuHandler(event);
-    if (content != null) app.dialog.show(menuItems, content);
+    if (content == null) return;
+    if (content.actions.click()) {
+      app.dialog.show(menuItems, content);
+    }
   });
   $images.addEventListener("mousedown", (event) => {
     if (event.buttons === 1) drawArea(event, true);

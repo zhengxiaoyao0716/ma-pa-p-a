@@ -22,7 +22,6 @@ const routers = {
     }
     const output = services.webgl2.chunk(width, height, align, data, plte);
     const trans = [output, count.buffer, plte.buffer, data.buffer];
-    // await new Promise((r) => setTimeout(() => r(), Math.random() * 1000));
     return { arch, chunk, data, plte, trans };
   },
 
@@ -336,6 +335,7 @@ self.addEventListener(
   async ({ data: { type, body } }) => {
     try {
       const resp = await routers[type](body);
+      // await new Promise((r) => setTimeout(() => r(), Math.random() * 1000));
       self.postMessage({ type, resp }, resp.trans);
     } catch (error) {
       self.postMessage({ type, error });

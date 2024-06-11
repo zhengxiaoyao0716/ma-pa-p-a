@@ -446,6 +446,13 @@
       height: calc(100% + 0.6em);
     }
     border-bottom: 1px solid var(--frame);
+    max-height: 3em;
+    transition: max-height 0.2s, padding-top 0.2s, padding-bottom 0.2s;
+    &.fold {
+      max-height: 0;
+      padding-top: 0;
+      padding-bottom: 0;
+    }
   }
 }
 

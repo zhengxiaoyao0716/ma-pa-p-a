@@ -15,7 +15,7 @@ export interface Palette {
       offset: number;
     }[];
   };
-  dirty?: number;
+  layers: number[];
 }
 
 export interface Archive {
