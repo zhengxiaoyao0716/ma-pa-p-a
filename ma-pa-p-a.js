@@ -100,7 +100,7 @@ export class App extends EventTarget {
 
   //#endregion
 
-  //#region palette operate
+  //#region image processing
 
   /** @type {"count" | "color"} */
   sortBy = "count";
@@ -127,8 +127,13 @@ export class App extends EventTarget {
   /** @param {(Palette | { color: number, count: number, split: Palette[] })[]} palettes . */
   *iterPalettes(palettes) {
     for (const palette of palettes) {
-      if ("code" in palette) yield palette;
-      else yield* palette.split;
+      if ("code" in palette) {
+        if (palette.code !== "") yield palette;
+      } else {
+        for (const child of palette.split) {
+          if (child.code !== "") yield child;
+        }
+      }
     }
   }
 
@@ -196,13 +201,23 @@ export class App extends EventTarget {
       });
     }
     if ("code" in palette) {
-      if (palette.layers[this.layer] === undefined) return palette;
+      if (palette.code === "") {
+        this.paletteNum++;
+        palette.code = code;
+        palette.count = 0;
+        palette.refer = {};
+        palette.layers = [];
+        return palette;
+      } else if (palette.layers[this.layer] === undefined) {
+        return palette;
+      }
       palette.code = `${code}00`;
       this.palettes[code] = { color, count: palette.count, split: [palette] };
     }
     /** @type {{color: number, count: number, split: Palette[]}} */
     const parent = this.palettes[code];
     for (const palette of parent.split) {
+      if (palette.code === "") continue; // removed
       if (palette.layers[this.layer] === undefined) return palette;
     }
     this.paletteNum++;
@@ -229,6 +244,13 @@ export class App extends EventTarget {
     return children;
   }
 
+  /** @param {string} code . */
+  eraseColor(code) {
+    if (this.dirtyBusy > 0) return;
+    const opacity = this.computePalette(0x00000000);
+    return this.mergeColor(opacity.code, code);
+  }
+
   /**
    * merge palette color.
    *
@@ -236,9 +258,30 @@ export class App extends EventTarget {
    * @param {number} from .
    */
   mergeColor(code, from) {
+    if (this.dirtyBusy > 0) return;
     if (code === from) return;
-    // TODO
-    this.log("info", `code: ${code}, from: ${from}`);
+    const palette0 = this.getPalette(code);
+    const palette1 = this.getPalette(from);
+    palette1.code = ""; // mark as removed
+    this.paletteNum--;
+    palette0.count += palette1.count;
+
+    const rgba = parseRGBA(palette0.layers[this.layer] ?? palette0.color);
+    if (palette0 == null || palette1 == null) return;
+    for (const [arch, refer1] of Object.entries(palette1.refer)) {
+      const refer0 = palette0.refer[arch] ?? (palette0.refer[arch] = []);
+      const chunks =
+        this.dirtyChunks[arch] ?? (this.dirtyChunks[arch] = new Set());
+      const archives = this.archives[arch];
+      for (const { chunk, offset } of refer1) {
+        const { texture } = archives.chunks[chunk];
+        if (texture == null) continue;
+        refer0.push({ chunk, offset });
+        chunks.add(chunk);
+        const { plte } = texture;
+        plte.set(rgba, offset);
+      }
+    }
   }
 
   /** @param {Palette} palette . @param {number} color . */
@@ -329,6 +372,59 @@ export class App extends EventTarget {
     }
   }
 
+  /**
+   * zoom image.
+   *
+   * @param {string} name .
+   * @param {import("./types").Rect} rect .
+   */
+  zoomImage(name, rect) {
+    const archive = this.archives[name];
+    const { offsetLeft, offsetTop, offsetWidth, offsetHeight, width, height } =
+      archive.ctx.canvas;
+    const x = rect[0] - offsetLeft;
+    const y = rect[1] - offsetTop;
+    const w = (rect[2] * width) / offsetWidth;
+    const h = (rect[3] * height) / offsetHeight;
+    const bound = [
+      Math.round(x < 0 ? 0 : x),
+      Math.round(y < 0 ? 0 : y),
+      Math.round(w > width ? width : w),
+      Math.round(h > height ? height : h),
+    ];
+    // TODO
+    this.log("info", bound.join(", "));
+
+    if (archive.zoom == null) {
+      const length = 1 + ((archive.chunks.length - 1) >> 3);
+      archive.zoom = { bound, visible: new Uint8ClampedArray(length) };
+    } else {
+      archive.zoom.bound = bound;
+    }
+    const { visible } = archive.zoom;
+    for (let i = 0; i < visible.length; i++) {
+      let flag = 0;
+      for (let offset = 0; offset < 8; offset++) {
+        const index = (i << 3) + offset;
+        if (index >= archive.chunks.length) break;
+        const { rect } = archive.chunks[index];
+        const intersect = isRectIntersect(
+          bound[0],
+          bound[1],
+          bound[2],
+          bound[3],
+          rect[0],
+          rect[1],
+          rect[0] + rect[2],
+          rect[1] + rect[3]
+        );
+        if (intersect) flag |= 1 << offset;
+      }
+      visible[i] = flag;
+      console.log(flag.toString(2));
+    }
+  }
+
   //#endregion
 
   /**
@@ -357,6 +453,8 @@ export class App extends EventTarget {
       const { canvas } = archive.ctx;
       canvas.width = bitmap.width;
       canvas.height = bitmap.height;
+      archive.ctx.strokeStyle = "#808080";
+      archive.ctx.strokeRect(0, 0, bitmap.width, bitmap.height);
       canvas.classList.remove("loading");
 
       const arch = canvas.title;
@@ -825,6 +923,16 @@ function transToHsl(r, g, b, a) {
   return [hue, saturation, lightness, alpha];
 }
 
+function isRectIntersect(l0, t0, r0, b0, l1, t1, r1, b1) {
+  const left = l0 < l1 ? l1 : l0;
+  const right = r0 < r1 ? r0 : r1;
+  if (left > right) return false;
+  const top = t0 < t1 ? t1 : t0;
+  const bottom = b0 < b1 ? b0 : b1;
+  if (top > bottom) return false;
+  return true;
+}
+
 /**
  * dump file.
  *
@@ -1006,6 +1114,7 @@ function createTitlebar(app) {
     if (app.checkBusy()) return;
     app.mergeColor(code, from);
     app.flushDirty();
+    app.log("info", `merged ${code} into ${from}`);
   });
   /** @param {DragEvent} event . */
   function dragover(event) {
@@ -1051,22 +1160,30 @@ function createTitlebar(app) {
       ctrl: "Focus",
       shift: "Toggle",
       alt: "Exclude",
+      erase: "Erase",
       merge: () =>
         $colors.hasAttribute("merge-color")
           ? "Merge selected"
-          : "Select to merge",
-      restore: "Restore",
+          : "Merge to other",
     },
     ({ target: $color }) => {
       if (!($color instanceof HTMLAnchorElement)) return;
       const code = $color.id.slice(5);
+      const raw = `#${code.slice(0, 8).toLowerCase()}`;
       const hex = $color.style.getPropertyValue("--color");
       const color = Number.parseInt(hex.slice(1), 16);
       const [r, g, b, a] = parseRGBA(color);
       const [h, s, l, alpha] = transToHsl(r, g, b, a).map(Math.round);
 
+      const mergeFrom = $colors.getAttribute("merge-color");
+      if (mergeFrom && mergeFrom === code) {
+        $colors.removeAttribute("merge-color");
+      }
+
       const html = () => `<div class="titlebar header hr">
-        <span class="color tp-grid" style="--color: ${hex};"></span>
+        <a${raw === hex ? "" : ' id="restore"'} title="Restore"
+          class="color tp-grid" href="javascript:void(0);" style="--color: ${raw};"
+        ></a>
         <label>
           <span>${$color.title}</span>
           <small>rgb(${r} ${g} ${b} / ${a})</small>
@@ -1153,15 +1270,29 @@ function createTitlebar(app) {
           shift: toggle,
           alt: () => highlight(false),
           restore,
+          erase: () => {
+            if (app.checkBusy()) return;
+            app.eraseColor(code);
+            app.flushDirty();
+            app.log("info", `erased color ${code}`);
+          },
           merge: () => {
             const from = $color.parentElement.getAttribute("merge-color");
             if (from == null) {
               $color.parentElement.setAttribute("merge-color", code);
+              const svg =
+                '<svg xmlns="http://www.w3.org/2000/svg" width="16px" height="16px" viewBox="0 0 24 24">' +
+                `<g fill="${hex}" stroke="#808080" stroke-width="4"><rect x="0" y="0" width="24" height="24" /></g></svg>`;
+              const uri = `url('data:image/svg+xml,${encodeURIComponent(
+                svg
+              )}')`;
+              $color.parentElement.style.setProperty("--cursor", uri);
             } else {
               $color.parentElement.removeAttribute("merge-color");
               if (app.checkBusy()) return;
               app.mergeColor(code, from);
               app.flushDirty();
+              app.log("info", `merged color ${code} into ${from}`);
             }
           },
         },
@@ -1289,10 +1420,15 @@ function createArchives(app) {
   const $selectArea = document.createElement("div");
   $selectArea.id = "selectArea";
   const selection = {
-    name: "",
+    get name() {
+      return $selectArea.title;
+    },
+    set name(value) {
+      $selectArea.title = value;
+      if (value !== "") app.log("info", `focus on ${value}`);
+    },
     posX: 0,
     posY: 0,
-    topY: 0,
     type: "",
     time: 0,
     /** @type {import("./types").Rect | null} */
@@ -1304,46 +1440,76 @@ function createArchives(app) {
       // scrolling
       $selectArea.classList.remove("show");
       selection.name = "";
-      return;
+      return null;
     }
-    const $canvas = event.target;
-    if (!($canvas instanceof HTMLCanvasElement)) return selection.rect;
+    const $images = event.currentTarget;
+    if (!($images instanceof HTMLDivElement)) return null;
     const mouse = event instanceof TouchEvent ? event.touches[0] : event;
     if (mouse == null) return selection.rect;
-    const { left, top } = $canvas.parentElement.getBoundingClientRect();
-    const { scrollTop } = $canvas.parentElement.parentElement;
-    const { clientX, clientY } = mouse;
+    const { left, top } = $images.getBoundingClientRect();
+    const mouseX = mouse.clientX - left;
+    const mouseY = mouse.clientY - top;
+    const { scrollTop } = $images.parentElement;
 
-    if (selection.name !== $canvas.title) {
-      if (!create) return null;
-      selection.name = $canvas.title;
-      selection.posX = clientX;
-      selection.posY = clientY;
-      selection.topY = scrollTop;
+    const $canvas = event.target;
+    let init = create;
+    if ($canvas instanceof HTMLCanvasElement) {
+      if (selection.name === $canvas.title) {
+        init = false;
+      } else if (selection.name === "") {
+        if (init) {
+          init = selection.rect == null;
+          selection.name = $canvas.title;
+          $canvas.focus();
+        } else if (selection.rect == null) {
+          return;
+        } else {
+          selection.name = $canvas.title;
+          $canvas.focus();
+        }
+      } else if (init) {
+        return selection.rect;
+        // selection.name = $canvas.title;
+        // $canvas.focus();
+        // selection.rect = null;
+      }
+    } else {
+      if (selection.name === "") {
+        if (!init && selection.rect == null) return;
+        selection.rect = [0, 0, 0, 0];
+      } else {
+        init = false;
+      }
+    }
+    if (init) {
+      selection.posX = mouseX;
+      selection.posY = mouseY + scrollTop;
+      if (event.ctrlKey) selection.type = "zoom";
+      else if (event.shiftKey) selection.type = "split";
+      else if (event.altKey) selection.type = "erase";
       selection.time = performance.now();
-      $selectArea.style.left = `${clientX - left}px`;
-      $selectArea.style.top = `${clientY - top}px`;
+      $selectArea.style.left = `${mouseX}px`;
+      $selectArea.style.top = `${mouseY}px`;
       $selectArea.style.width = `0px`;
       $selectArea.style.height = `0px`;
       $selectArea.classList.add("show");
-      return (selection.rect = null);
+      return selection.rect;
     }
     if (event instanceof TouchEvent && event.touches.length >= 2) {
       event.preventDefault();
       event.stopPropagation();
-      const { clientX: posX, clientY: posY } =
-        event.touches[event.touches.length - 1];
-      selection.posX = posX;
-      selection.posY = posY;
+      const { clientX, clientY } = event.touches[event.touches.length - 1];
+      selection.posX = clientX - left;
+      selection.posY = clientY - top + scrollTop;
     }
-    const { posX, posY: _posY, topY } = selection;
-    const posY = _posY + topY - scrollTop;
-    const [x, endX] = clientX < posX ? [clientX, posX] : [posX, clientX];
-    const [y, endY] = clientY < posY ? [clientY, posY] : [posY, clientY];
+    const posX = selection.posX;
+    const posY = selection.posY - scrollTop;
+    const [x, endX] = mouseX < posX ? [mouseX, posX] : [posX, mouseX];
+    const [y, endY] = mouseY < posY ? [mouseY, posY] : [posY, mouseY];
     const w = endX - x;
     const h = endY - y;
-    $selectArea.style.left = `${x - left}px`;
-    $selectArea.style.top = `${y - top}px`;
+    $selectArea.style.left = `${x}px`;
+    $selectArea.style.top = `${y}px`;
     $selectArea.style.width = `${w}px`;
     $selectArea.style.height = `${h}px`;
     return (selection.rect = [x, y, w, h]);
@@ -1363,6 +1529,17 @@ function createArchives(app) {
     selection.name = selection.type = "";
     selection.rect = null;
     // TODO
+    switch (type) {
+      case "zoom":
+        app.zoomImage(arch, rect);
+        break;
+      case "split":
+        break;
+      case "erase":
+        break;
+      default:
+        return;
+    }
     app.log(
       "info",
       `submit area, ${arch} - ${type}: ${rect.map((i) => i.toFixed(0))}`
@@ -1375,23 +1552,28 @@ function createArchives(app) {
   };
   /** @param {MouseEvent | TouchEvent} event . */
   const menuHandler = (event) => {
+    const pass = performance.now() - selection.time;
+    const rect = pass < 300 ? null : drawArea(event);
     const arch =
-      event.target instanceof HTMLCanvasElement
+      selection.name === "" && event.target instanceof HTMLCanvasElement
         ? event.target.title
         : selection.name;
-    if (!arch) return;
-    const { ctx, chunks } = app.archives[arch];
-    const { width, height } = ctx.canvas;
-    const html = () => `<label class="header hr">
+
+    const html = () => {
+      if (arch === "") {
+        return `<label class="header hr"><span>Select editor action</span></label>`;
+      }
+      const { ctx, chunks } = app.archives[arch];
+      const { width, height } = ctx.canvas;
+      return `<label class="header hr">
       <span>${arch}</span>
       <small>${width}x${height} with ${chunks.length} chunk</small>
     </label>`;
+    };
 
-    const pass = performance.now() - selection.time;
-    const rect = pass < 300 ? null : drawArea(event);
     /** @param {string} type . */
     function selectType(type) {
-      if (rect == null) selection.type = type;
+      if (arch === "" || rect == null) selection.type = type;
       else submitArea(arch, type, rect);
     }
     return {
@@ -1423,19 +1605,23 @@ function createArchives(app) {
   $images.addEventListener("touchend", (event) => {
     if (!event.cancelable) return;
     if (event.touches.length > 0) {
-      const { clientX: posX, clientY: posY } =
+      const { left, top } = event.currentTarget.getBoundingClientRect();
+      const { scrollTop } = event.currentTarget.parentElement;
+      const { clientX, clientY } =
         event.changedTouches[event.changedTouches.length - 1];
-      selection.posX = posX;
-      selection.posY = posY;
+      selection.posX = clientX - left;
+      selection.posY = clientY - top + scrollTop;
       return;
     }
     event.preventDefault();
     event.stopPropagation();
     const content = menuHandler(event);
     if (content == null) return;
-    if (content.actions.click()) {
-      app.dialog.show(menuItems, content);
-    }
+    const { ctrl, shift, alt, click } = content.actions;
+    if (event.ctrlKey) ctrl();
+    else if (event.shiftKey) shift();
+    else if (event.altKey) alt();
+    else if (click()) app.dialog.show(menuItems, content);
   });
   $images.addEventListener("mousedown", (event) => {
     if (event.buttons === 1) drawArea(event, true);

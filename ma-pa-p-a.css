@@ -181,6 +181,9 @@
       rotate: 45deg;
     }
   }
+  & > .colors[merge-color] > a {
+    cursor: var(--cursor), cell;
+  }
   & > #menu {
     flex: 0 0 1.5em;
     text-align: center;
@@ -220,16 +223,24 @@
       border-radius: 1.5em;
       position: relative;
       overflow: hidden;
+      cursor: pointer;
       --grid-size: 8px;
 
       &::after {
         content: "";
         position: absolute;
         padding: 1em;
-        border-radius: 1em;
-        left: 0.5em;
-        top: 0.5em;
+        border: 0.05em solid var(--paper);
+        border-radius: 1.05em;
+        left: 0.45em;
+        top: 0.45em;
         background-color: var(--color);
+      }
+      &:hover::after {
+        border-color: var(--frame);
+      }
+      &:active::after {
+        border-color: var(--title);
       }
     }
     & > label {
@@ -255,7 +266,6 @@
   position: relative;
   flex: 1 1 32em;
   overflow: hidden auto;
-  cursor: crosshair;
   --grid-size: 16px;
 
   & > #images {
@@ -264,6 +274,7 @@
     min-height: 100%;
     box-sizing: border-box;
     user-select: none;
+    cursor: crosshair;
 
     & > canvas {
       position: relative;
