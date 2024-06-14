@@ -16,6 +16,7 @@ export interface Palette {
     }[];
   };
   layers: number[];
+  disable: boolean;
 }
 
 export interface Archive {

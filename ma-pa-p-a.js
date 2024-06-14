@@ -11,7 +11,7 @@
 
 /** Magic Palette for Pixel Arts Application */
 export class App extends EventTarget {
-  layer = 0;
+  layer = 1;
   layerNum = 1;
   /** @type {{[code: string]: Palette | { color: number, count: number, split: Palette[] }}} */
   palettes = {};
@@ -208,6 +208,7 @@ export class App extends EventTarget {
         count: 0,
         refer: {},
         layers: [],
+        disable: false,
       });
     }
     if ("code" in palette) {
@@ -218,7 +219,7 @@ export class App extends EventTarget {
         palette.refer = {};
         palette.layers = [];
         return palette;
-      } else if (palette.layers[this.layer] === undefined) {
+      } else if (!palette.disable && palette.layers[this.layer] === undefined) {
         return palette;
       }
       palette.code = `${code}00`;
@@ -228,7 +229,9 @@ export class App extends EventTarget {
     const parent = this.palettes[code];
     for (const palette of parent.split) {
       if (palette.code === "") continue; // removed
-      if (palette.layers[this.layer] === undefined) return palette;
+      if (!palette.disable && palette.layers[this.layer] === undefined) {
+        return palette;
+      }
     }
     this.paletteNum++;
     let count = 0;
@@ -249,6 +252,7 @@ export class App extends EventTarget {
       },
       refer: {},
       layers: [],
+      disable: false,
     };
     parent.split.push(children);
     return children;
@@ -264,8 +268,8 @@ export class App extends EventTarget {
   /**
    * merge palette color.
    *
-   * @param {number} code .
-   * @param {number} from .
+   * @param {string} code .
+   * @param {string} from .
    */
   mergeColor(code, from) {
     if (this.dirtyBusy > 0) return;
@@ -276,7 +280,11 @@ export class App extends EventTarget {
     this.paletteNum--;
     palette0.count += palette1.count;
 
-    const rgba = parseRGBA(palette0.layers[this.layer] ?? palette0.color);
+    const rgba = parseRGBA(
+      palette0.disable
+        ? 0x000000
+        : palette0.layers[this.layer] ?? palette0.color
+    );
     if (palette0 == null || palette1 == null) return;
     for (const [arch, refer1] of Object.entries(palette1.refer)) {
       const refer0 = palette0.refer[arch] ?? (palette0.refer[arch] = []);
@@ -291,6 +299,29 @@ export class App extends EventTarget {
         const { plte } = texture;
         plte.set(rgba, offset);
       }
+    }
+    // clean
+    if (from.length === 8) {
+      delete this.palettes[from];
+      return;
+    }
+    const main = from.slice(0, 8);
+    const parent = this.palettes[main];
+    if (parent == null || "code" in parent) return;
+    /** @type {Palette | undefined} */ let found;
+    for (const palette of parent.split) {
+      if (palette.code === "") continue;
+      if (found === undefined) {
+        found = palette;
+      } else {
+        // more than one
+        return;
+      }
+    }
+    if (found === undefined) {
+      delete this.palettes[main];
+    } else {
+      this.palettes[main] = { ...found, code: main };
     }
   }
 
@@ -312,6 +343,22 @@ export class App extends EventTarget {
   }
 
   /**
+   * toggle color.
+   *
+   * @param {string} code .
+   * @param {boolean} disable .
+   */
+  toggleColor(code, disable) {
+    if (this.dirtyBusy > 0) return;
+    const palette = this.getPalette(code);
+    if (palette == null || disable == palette.disable) return;
+    palette.disable = disable;
+    const color = disable
+      ? 0x00000000
+      : palette.layers[this.layer] ?? palette.color;
+    this._setColor(palette, color);
+  }
+  /**
    * update color.
    *
    * @param {string} code .
@@ -322,7 +369,8 @@ export class App extends EventTarget {
     const palette = this.getPalette(code);
     if (palette == null) return;
     const dirty = color === palette.color ? undefined : color;
-    if (dirty === palette.layers[this.layer]) return;
+    if (dirty === palette.layers[this.layer] && !palette.disable) return;
+    palette.disable = false;
     palette.layers[this.layer] = dirty;
     this._setColor(palette, color);
   }
@@ -331,7 +379,8 @@ export class App extends EventTarget {
     if (this.dirtyBusy > 0) return;
     const palette = this.getPalette(code);
     if (palette == null) return;
-    if (palette.layers[this.layer] === undefined) return;
+    if (!palette.disable && palette.layers[this.layer] === undefined) return;
+    palette.disable = false;
     palette.layers[this.layer] = undefined;
     this._setColor(palette, palette.color);
   }
@@ -341,12 +390,13 @@ export class App extends EventTarget {
     if (this.dirtyBusy > 0) return;
     if (layer === this.layer) return;
     const old = this.layer;
-    if (layer < 0) this.layer = this.layerNum - 1;
-    else if (layer >= this.layerNum) this.layer = 0;
+    if (layer < 0) this.layer = this.layerNum;
+    else if (layer > this.layerNum) this.layer = 0;
     else this.layer = layer;
 
     const palettes = Object.values(this.palettes);
     for (const palette of this.iterPalettes(palettes)) {
+      if (palette.disable) continue;
       const dirty = palette.layers[this.layer];
       if (dirty === palette.layers[old]) continue;
       this._setColor(palette, dirty ?? palette.color);
@@ -356,7 +406,7 @@ export class App extends EventTarget {
   appendLayer() {
     // if (this.dirtyBusy > 0) return;
     const layer = this.layer;
-    this.layer = this.layerNum++;
+    this.layer = ++this.layerNum;
 
     const palettes = Object.values(this.palettes);
     for (const palette of this.iterPalettes(palettes)) {
@@ -370,16 +420,37 @@ export class App extends EventTarget {
     if (this.dirtyBusy > 0) return;
     const layer = this.layer;
     if (this.layerNum > 1) this.layerNum--;
-    if (this.layer >= this.layerNum) this.layer = this.layerNum - 1;
+    if (this.layer > this.layerNum) this.layer = this.layerNum;
 
     const palettes = Object.values(this.palettes);
     for (const palette of this.iterPalettes(palettes)) {
       // remove current layer dirty color.
       const remove = palette.layers.splice(layer, 1);
+      if (palette.disable) continue;
       const dirty = palette.layers[this.layer];
       if (remove === dirty) continue;
       this._setColor(palette, dirty ?? palette.color);
     }
+  }
+
+  /**
+   * erase area.
+   *
+   * @param {string} name .
+   * @param {Rect} area .
+   */
+  eraseArea(name, area) {
+    // TODO
+  }
+
+  /**
+   * split area.
+   *
+   * @param {string} name .
+   * @param {Rect} area .
+   */
+  splitArea(name, area) {
+    // TODO
   }
 
   /**
@@ -520,6 +591,8 @@ export class App extends EventTarget {
   }
 
   clearAll() {
+    this.layer = 1;
+    this.layerNum = 1;
     this.palettes = {};
     this.paletteNum = 0;
     this.archives = {};
@@ -552,17 +625,20 @@ export class App extends EventTarget {
 
   dump() {
     const palettes = Array.from(this.iterPalettes(this.sortedPalettes()));
-    const colors = palettes.flatMap(({ color }) => parseRGBA(color));
+    const origin = palettes.map(({ color }) => parseRGBA(color));
+    const colors = palettes.flatMap(({ layers: [dirty] }, i) =>
+      dirty == null ? origin[i] : parseRGBA(dirty)
+    );
     const rowSize = colors.length;
     let length = rowSize;
-    for (let j = 0; j < this.layerNum; j++) {
+    for (let j = 1; j <= this.layerNum; j++) {
       let regress = true;
       for (let i = 0; i < palettes.length; i++) {
         const dirty = palettes[i].layers[j];
         if (dirty === undefined) {
-          let position = i << 2;
-          for (let offset = 0; offset < 4; offset++) {
-            colors[length++] = colors[position + offset];
+          const color = origin[i];
+          for (const value of color) {
+            colors[length++] = value;
           }
         } else {
           regress = false;
@@ -1187,7 +1263,7 @@ function fetchAndParse(app, query) {
  * @param {Palette} palette .
  * @returns {HTMLAnchorElement} .
  */
-function paletteColor(layer, index, { code, color, count, layers }) {
+function paletteColor(layer, index, { code, color, count, layers, disable }) {
   const $color = document.createElement("a");
   $color.id = `color${code}`;
   $color.title = `${index}. ${code}: ${
@@ -1205,7 +1281,6 @@ function paletteColor(layer, index, { code, color, count, layers }) {
   }
   const hex = `#${rgba.toString(16).padStart(8, "0")}`;
   $color.style.setProperty("--color", hex);
-  const disable = dirty === 0;
   if (disable) $color.classList.add("cross-out");
   else $color.classList.remove("cross-out");
   $color.href = "javascript:void(0);";
@@ -1379,7 +1454,7 @@ function createTitlebar(app) {
       const toggle = () => {
         if (app.checkBusy()) return;
         const disable = !$color.classList.contains("cross-out");
-        app.updateColor(code, disable ? 0x00000000 : color);
+        app.toggleColor(code, disable);
         app.flushDirty();
         app.log("info", `color ${disable ? "disabled" : "enabled "}: ${code}`);
       };
@@ -1391,9 +1466,9 @@ function createTitlebar(app) {
           const code = $color.id.slice(5);
           const hex = $color.style.getPropertyValue("--color");
           const color = Number.parseInt(hex.slice(1), 16);
-          app.updateColor(code, focus ? 0x00000000 : color);
+          app.toggleColor(code, focus);
         }
-        app.updateColor(code, focus ? color : 0x00000000);
+        app.toggleColor(code, !focus);
         app.flushDirty();
         app.log("info", `color ${focus ? "focused " : "excluded"}: ${code}`);
       };
@@ -1461,8 +1536,8 @@ function createTitlebar(app) {
       const html = () => `<label class="header">
         <span title="Prev:   ⌥ Alt + Click\nNext: ⇧ Shift + Click">
           <span>Layer:</span>
-          <input id="layer" type="number" min="1"
-            max="${app.layerNum}" value="${1 + app.layer}">
+          <input id="layer" type="number" min="0"
+            max="${app.layerNum}" value="${app.layer}">
           <span>/</span>
           <span class="titlebar layer-num">
             <button id="remove" title="Remove layer">-</button>
@@ -1477,7 +1552,7 @@ function createTitlebar(app) {
         if (app.checkBusy()) return;
         app.switchLayer(layer);
         app.flushDirty();
-        app.log("info", `switch to layer ${1 + app.layer}`);
+        app.log("info", `switch to layer ${app.layer}`);
       };
       /** @param {HTMLDivElement} $dialog . */
       const show = ($dialog) => {
@@ -1485,12 +1560,11 @@ function createTitlebar(app) {
         const $submit = $dialog.querySelector("#submit");
         let layer = app.layer;
         $input.addEventListener("input", ({ currentTarget }) => {
-          const value = Number.parseInt(currentTarget.value.trim() || "0");
-          if (value <= 0 || value > app.layerNum) {
+          layer = Number.parseInt(currentTarget.value.trim() || "0");
+          if (layer < 0 || layer > app.layerNum) {
             layer = app.layer;
-          } else {
-            layer = value - 1;
-            if (layer !== app.layer) $submit.classList.remove("fold");
+          } else if (layer !== app.layer) {
+            $submit.classList.remove("fold");
           }
         });
         $submit.addEventListener("click", () => {
@@ -1511,13 +1585,13 @@ function createTitlebar(app) {
             // if (app.checkBusy()) return;
             app.appendLayer();
             // app.flushDirty();
-            app.log("info", `append layer at ${1 + app.layer}`);
+            app.log("info", `append layer at ${app.layer}`);
           },
           remove: () => {
             if (app.checkBusy()) return;
             app.removeLayer();
             app.flushDirty();
-            app.log("info", `remove layer at ${1 + app.layer}`);
+            app.log("info", `remove layer at ${app.layer}`);
           },
           clear: () => app.clearAll(),
           sort: () => {
@@ -1675,8 +1749,10 @@ function createArchives(app) {
         app.zoomImage(arch, area);
         break;
       case "split":
+        app.splitArea(arch, area);
         break;
       case "erase":
+        app.eraseArea(arch, area);
         break;
       default:
         return;
