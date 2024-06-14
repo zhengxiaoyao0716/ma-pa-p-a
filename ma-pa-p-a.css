@@ -279,9 +279,13 @@
     & > canvas {
       position: relative;
       max-width: 100%;
+      image-rendering: pixelated;
       &.loading {
         width: 64px;
         height: 64px;
+      }
+      &.zoom {
+        width: 100%;
       }
     }
   }

@@ -1,5 +1,4 @@
 export type Rect = [x: number, y: number, w: number, h: number];
-export type Bound = [left: number, top: number, right: number, bottom: number];
 
 export interface Texture {
   readonly data: Uint8ClampedArray; // [index0,index1,...]
@@ -25,8 +24,8 @@ export interface Archive {
   };
   readonly chunks: { readonly rect: Rect; readonly texture?: Texture }[];
   zoom?: {
-    bound: Bound;
-    visible: Uint8ClampedArray;
+    rect: Rect;
+    visible: Map<number, Rect>;
   };
 }
 
@@ -62,22 +61,12 @@ export interface Msg {
     };
   };
 
-  mergeColor: {
-    req: {
-      arch: string;
-      chunk: number;
-      width: number;
-      height: number;
-      trans: [plte: ArrayBuffer, data: ArrayBuffer];
-    };
-  };
-
   updateChunk: Texture & {
     req: {
       arch: string;
       chunk: number;
-      width: number;
-      height: number;
+      rect: Rect;
+      visible: Rect | null;
       trans: [plte: ArrayBuffer, data: ArrayBuffer];
     };
     resp: Texture & {

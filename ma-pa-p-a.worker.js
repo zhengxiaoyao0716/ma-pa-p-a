@@ -20,14 +20,15 @@ const routers = {
       plte.set(parseRGBA(color), index << 2);
       count[index] = counter.get(color);
     }
-    const output = services.webgl2.chunk(width, height, align, data, plte);
+    const rect = [0, 0, width, height];
+    const output = services.webgl2.chunk(rect, null, align, data, plte);
     const trans = [output, count.buffer, plte.buffer, data.buffer];
     return { arch, chunk, data, plte, trans };
   },
 
-  updateChunk: async ({ arch, chunk, width, height, data, plte }) => {
-    const align = alignWidth(width);
-    const output = services.webgl2.chunk(width, height, align, data, plte);
+  updateChunk: async ({ arch, chunk, rect, visible, data, plte }) => {
+    const align = alignWidth(rect[2]);
+    const output = services.webgl2.chunk(rect, visible, align, data, plte);
     const trans = [output, plte.buffer, data.buffer];
     return { arch, chunk, data, plte, trans };
   },
@@ -126,7 +127,7 @@ layout (location = 0) in vec2 vertex;
 out vec2 uv;
 
 void main() {
-  uv = 0.5 * vertex + vec2(0.5);
+  uv = vec2(0.5, -0.5) * vertex + vec2(0.5);
   gl_Position = vec4(vertex, 0.0, 1.0);
 }
 `,
@@ -137,12 +138,12 @@ precision highp float;
 in vec2 uv;
 out vec4 fragColor;
 
-uniform vec2 size;
+uniform vec4 trans;
 uniform lowp usampler2D dataTex;
 uniform sampler2D plteTex;
 
 void main() {
-  ivec2 pos = ivec2(uv * size);
+  ivec2 pos = ivec2(uv * trans.zw + trans.xy);
   lowp uint index = texelFetch(dataTex, pos, 0).r;
   fragColor = texelFetch(plteTex, ivec2(index, 0), 0);
 }
@@ -200,7 +201,7 @@ void main() {
     gl.bindVertexArray(null);
     //#endregion
 
-    this.sizeLoc = gl.getUniformLocation(program, "size");
+    this.transLoc = gl.getUniformLocation(program, "trans");
     this.dataTexLoc = gl.getUniformLocation(program, "dataTex");
     this.plteTexLoc = gl.getUniformLocation(program, "plteTex");
 
@@ -221,33 +222,37 @@ void main() {
   /**
    * render chunk.
    *
-   * @param {number} width .
-   * @param {number} height .
+   * @param {import("./types").Rect} rect .
+   * @param {import("./types").Rect | null} visible .
    * @param {number} align .
    * @param {ArrayBufferView} data .
    * @param {ArrayBufferView} plte .
    * @returns {ImageBitmap} output
    */
-  chunk(width, height, align, data, plte) {
+  chunk([x, y, w, h], visible, align, data, plte) {
     const { gl, program } = this;
     // resize and clear view
-    gl.canvas.width = width;
-    gl.canvas.height = height;
-    gl.viewport(0, 0, width, height);
+    gl.canvas.width = w;
+    gl.canvas.height = h;
+    gl.viewport(0, 0, w, h);
     gl.clearColor(0.0, 0.0, 0.0, 0.0);
     gl.clear(gl.COLOR_BUFFER_BIT);
     gl.useProgram(program);
+    const trans =
+      visible == null
+        ? [0, 0, w, h]
+        : [visible[0] - x, visible[1] - y, visible[2], visible[3]];
 
     // texture0: dataTex
     gl.bindTexture(gl.TEXTURE_2D, this.textures[0]);
-    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+    // gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
     // if ((align & 0b11) !== 0) gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
     gl.texImage2D(
       /* target */ gl.TEXTURE_2D,
       /* level */ 0,
       /* internalformat */ gl.R8UI,
       /* width */ align,
-      /* height */ height,
+      /* height */ h,
       /* border */ 0,
       /* format */ gl.RED_INTEGER,
       /* type */ gl.UNSIGNED_BYTE,
@@ -270,7 +275,7 @@ void main() {
 
     // render output
     gl.bindVertexArray(this.vertexArray);
-    gl.uniform2f(this.sizeLoc, width, height);
+    gl.uniform4fv(this.transLoc, trans);
     gl.uniform1i(this.dataTexLoc, 0);
     gl.uniform1i(this.plteTexLoc, 1);
     gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);

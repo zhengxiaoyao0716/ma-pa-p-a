@@ -4,6 +4,7 @@
  */
 
 /**
+ * @typedef {import("./types").Rect} Rect
  * @typedef {import("./types").Palette} Palette
  * @typedef {import("./types").Archive} Archive
  */
@@ -64,7 +65,7 @@ export class App extends EventTarget {
         );
         return;
       }
-      const { ctx, chunks } = this.archives[arch];
+      const { ctx, chunks, zoom } = this.archives[arch];
       const { rect } = chunks[chunk];
       chunks[chunk] = { rect, texture: { data, plte } };
 
@@ -80,16 +81,15 @@ export class App extends EventTarget {
       }
       const detail = this.iterPalettes(this.sortedPalettes());
       this.dispatchEvent(new CustomEvent("updatePalette", { detail }));
-      ctx.drawImage(output, ...rect);
+      drawImage(ctx, output, chunk, rect, zoom);
     },
 
     updateChunk: ({ arch, chunk, data, plte, trans: [output] }) => {
       this.dirtyBusy--;
-      const { ctx, chunks } = this.archives[arch];
+      const { ctx, chunks, zoom } = this.archives[arch];
       const { rect } = chunks[chunk];
       chunks[chunk] = { rect, texture: { data, plte } };
-      ctx.clearRect(...rect);
-      ctx.drawImage(output, ...rect);
+      drawImage(ctx, output, chunk, rect, zoom);
     },
 
     dumpPalettes: ({ name, url }) => {
@@ -150,17 +150,20 @@ export class App extends EventTarget {
   flushDirty() {
     if (this.dirtyBusy > 0) return;
     for (const [arch, chunks] of Object.entries(this.dirtyChunks)) {
-      const archives = this.archives[arch];
+      const archive = this.archives[arch];
       for (const chunk of chunks) {
-        const { rect, texture } = archives.chunks[chunk];
+        const { rect, texture } = archive.chunks[chunk];
         if (texture == null) continue;
+        const visible =
+          archive.zoom == null ? null : archive.zoom.visible.get(chunk);
+        if (visible === undefined) continue;
         const { data, plte } = texture;
         this.dirtyBusy++;
         this.request("updateChunk", {
           arch,
           chunk,
-          width: rect[2],
-          height: rect[3],
+          rect,
+          visible,
           data,
           plte,
           trans: [plte.buffer, data.buffer],
@@ -376,53 +379,64 @@ export class App extends EventTarget {
    * zoom image.
    *
    * @param {string} name .
-   * @param {import("./types").Rect} rect .
+   * @param {Rect} area .
    */
-  zoomImage(name, rect) {
+  zoomImage(name, area) {
+    if (this.dirtyBusy > 0) return;
     const archive = this.archives[name];
-    const { offsetLeft, offsetTop, offsetWidth, offsetHeight, width, height } =
-      archive.ctx.canvas;
-    const x = rect[0] - offsetLeft;
-    const y = rect[1] - offsetTop;
-    const w = (rect[2] * width) / offsetWidth;
-    const h = (rect[3] * height) / offsetHeight;
-    const bound = [
-      Math.round(x < 0 ? 0 : x),
-      Math.round(y < 0 ? 0 : y),
-      Math.round(w > width ? width : w),
-      Math.round(h > height ? height : h),
-    ];
-    // TODO
-    this.log("info", bound.join(", "));
-
+    const { width, height } = archive.ctx.canvas;
+    const transFlat = [0, 0, width, height];
+    const transIter = archive.zoom == null ? transFlat : archive.zoom.rect;
+    const unitRect = calcUnitRect(archive, area);
+    const fixRatio = fixRatioRect(unitRect);
+    const rectFlat = transformRect(fixRatio, transFlat);
+    const rectIter = transformRect(fixRatio, transIter);
+    if (!archive.ctx.canvas.classList.contains("zoom")) {
+      archive.ctx.canvas.classList.add("zoom");
+    } else if (rectIter[2] < 128) {
+      // max scale, restore zoom
+      archive.ctx.canvas.classList.remove("zoom");
+      archive.zoom = undefined;
+      const chunks = (this.dirtyChunks[name] = new Set());
+      for (let i = 0; i < archive.chunks.length; i++) {
+        chunks.add(i);
+      }
+      return;
+    }
     if (archive.zoom == null) {
-      const length = 1 + ((archive.chunks.length - 1) >> 3);
-      archive.zoom = { bound, visible: new Uint8ClampedArray(length) };
+      archive.zoom = { rect: rectIter, visible: new Map() };
     } else {
-      archive.zoom.bound = bound;
+      archive.zoom.rect = rectIter;
     }
     const { visible } = archive.zoom;
-    for (let i = 0; i < visible.length; i++) {
-      let flag = 0;
-      for (let offset = 0; offset < 8; offset++) {
-        const index = (i << 3) + offset;
-        if (index >= archive.chunks.length) break;
-        const { rect } = archive.chunks[index];
-        const intersect = isRectIntersect(
-          bound[0],
-          bound[1],
-          bound[2],
-          bound[3],
-          rect[0],
-          rect[1],
-          rect[0] + rect[2],
-          rect[1] + rect[3]
-        );
-        if (intersect) flag |= 1 << offset;
-      }
-      visible[i] = flag;
-      console.log(flag.toString(2));
+    visible.clear();
+    for (const [index, bound, { rect }] of intersectChunks(
+      archive.chunks,
+      rectIter
+    )) {
+      visible.set(index, [
+        bound[0],
+        bound[1],
+        bound[2] - bound[0],
+        bound[3] - bound[1],
+      ]);
     }
+    const data = archive.ctx.getImageData(...rectFlat);
+    archive.ctx.clearRect(0, 0, width, height);
+    window.createImageBitmap(data).then((bitmap) => {
+      archive.ctx.drawImage(
+        bitmap,
+        0,
+        0,
+        bitmap.width,
+        bitmap.height,
+        0,
+        0,
+        width,
+        height
+      );
+      bitmap.close();
+    });
   }
 
   //#endregion
@@ -444,7 +458,10 @@ export class App extends EventTarget {
     canvas.title = name;
     canvas.classList.add("loading");
     /** @type {Archive} */
-    const archive = { ctx: canvas.getContext("2d"), chunks: [] };
+    const archive = {
+      ctx: canvas.getContext("2d", { willReadFrequently: true }),
+      chunks: [],
+    };
     this.archiveNum++;
     this.archives[name] = archive;
     this.dispatchEvent(new CustomEvent("createImage", { detail: archive }));
@@ -923,15 +940,147 @@ function transToHsl(r, g, b, a) {
   return [hue, saturation, lightness, alpha];
 }
 
-function isRectIntersect(l0, t0, r0, b0, l1, t1, r1, b1) {
+//#region area processing
+
+/** @returns {[left: number, top: number, right: number, bottom: number]} */
+function intersectBound(l0, t0, r0, b0, l1, t1, r1, b1) {
   const left = l0 < l1 ? l1 : l0;
   const right = r0 < r1 ? r0 : r1;
-  if (left > right) return false;
+  if (left > right) return null;
   const top = t0 < t1 ? t1 : t0;
   const bottom = b0 < b1 ? b0 : b1;
-  if (top > bottom) return false;
-  return true;
+  if (top > bottom) return null;
+  return [left, top, right, bottom];
 }
+/**
+ * iter intersect chunks.
+ *
+ * @param {Archive["chunks"]} chunks .
+ * @param {Rect} rect .
+ * @returns {Iterable<[number, ReturnType<typeof intersectBound>, Archive["chunks"][number]]>}
+ */
+function* intersectChunks(chunks, [left, top, width, height]) {
+  const right = left + width;
+  const bottom = top + height;
+  for (let index = 0; index < chunks.length; index++) {
+    const chunk = chunks[index];
+    const bound = intersectBound(
+      left,
+      top,
+      right,
+      bottom,
+      chunk.rect[0],
+      chunk.rect[1],
+      chunk.rect[0] + chunk.rect[2],
+      chunk.rect[1] + chunk.rect[3]
+    );
+    if (bound) yield [index, bound, chunk];
+  }
+}
+
+/**
+ * calc archive rect.
+ *
+ * @param {Archive} archive .
+ * @param {Rect} area .
+ * @returns {Rect} .
+ */
+function calcUnitRect(archive, area) {
+  const { offsetLeft, offsetTop, offsetWidth, offsetHeight } =
+    archive.ctx.canvas;
+  let x = (area[0] - offsetLeft) / offsetWidth;
+  let y = (area[1] - offsetTop) / offsetHeight;
+  let w = area[2] / offsetWidth;
+  let h = area[3] / offsetHeight;
+  if (x < 0) x = 0;
+  if (y < 0) y = 0;
+  const wm = 1 - x;
+  const hm = 1 - y;
+  if (w > wm) w = wm;
+  if (h > hm) h = hm;
+  return [x, y, w, h];
+}
+
+/**
+ * keep rect ratio.
+ *
+ * @param {Rect} rect .
+ * @returns {Rect} .
+ */
+function fixRatioRect(rect) {
+  let [x, y, w, h] = rect;
+  if (w < h) {
+    const min = 1 - h;
+    if (min < x) {
+      x = min;
+    } else {
+      x += (w - h) / 2;
+      if (x < 0) x = 0;
+    }
+    return [x, y, h, h];
+  } else if (w > h) {
+    const min = 1 - w;
+    if (min < y) {
+      y = min;
+    } else {
+      y += (h - w) / 2;
+      if (y < 0) y = 0;
+    }
+    return [x, y, w, w];
+  } else {
+    return rect;
+  }
+}
+
+/**
+ * transform rect.
+ *
+ * @param {Rect} rect .
+ * @param {Rect} transformer .
+ * @returns {Rect} .
+ */
+function transformRect([x, y, w, h], [moveX, moveY, scaleW, scaleH]) {
+  return [
+    Math.round(moveX + x * scaleW),
+    Math.round(moveY + y * scaleH),
+    Math.round(w * scaleW),
+    Math.round(h * scaleH),
+  ];
+}
+
+/**
+ * draw image.
+ *
+ * @param {CanvasRenderingContext2D} ctx .
+ * @param {ImageBitmap} output .
+ * @param {number} index .
+ * @param {Rect} rect .
+ * @param {Archive["zoom"]} zoom .
+ */
+function drawImage(ctx, output, index, [x, y, w, h], zoom) {
+  if (zoom == null) {
+    ctx.clearRect(x, y, w, h);
+    ctx.drawImage(output, x, y, w, h);
+    output.close();
+    return;
+  }
+  const intersect = zoom.visible.get(index);
+  if (intersect == null) {
+    output.close();
+    return;
+  }
+  const [sx, sy, sw, sh] = intersect;
+  const { width, height } = ctx.canvas;
+  const dx = ((sx - zoom.rect[0]) * width) / zoom.rect[2];
+  const dy = ((sy - zoom.rect[1]) * height) / zoom.rect[3];
+  const dw = (sw * width) / zoom.rect[2];
+  const dh = (sh * height) / zoom.rect[3];
+  ctx.clearRect(dx, dy, dw, dh);
+  ctx.drawImage(output, dx, dy, dw, dh);
+  output.close();
+}
+
+//#endregion
 
 /**
  * dump file.
@@ -951,7 +1100,7 @@ function dumpFile(name, url) {
  *
  * @param {{width: number, height: number}} imageSize .
  * @param {number} chunkSize .
- * @returns {Iterable<import("./types").Rect>} chunk rects
+ * @returns {Iterable<Rect>} chunk rects
  */
 function* chunkRects({ width, height }, chunkSize) {
   if (width > height) {
@@ -1431,8 +1580,8 @@ function createArchives(app) {
     posY: 0,
     type: "",
     time: 0,
-    /** @type {import("./types").Rect | null} */
-    rect: null,
+    /** @type {Rect | null} */
+    area: null,
   };
   /** @param {MouseEvent | TouchEvent} event . */
   function drawArea(event, create = false) {
@@ -1445,7 +1594,7 @@ function createArchives(app) {
     const $images = event.currentTarget;
     if (!($images instanceof HTMLDivElement)) return null;
     const mouse = event instanceof TouchEvent ? event.touches[0] : event;
-    if (mouse == null) return selection.rect;
+    if (mouse == null) return selection.area;
     const { left, top } = $images.getBoundingClientRect();
     const mouseX = mouse.clientX - left;
     const mouseY = mouse.clientY - top;
@@ -1458,25 +1607,25 @@ function createArchives(app) {
         init = false;
       } else if (selection.name === "") {
         if (init) {
-          init = selection.rect == null;
+          init = selection.area == null;
           selection.name = $canvas.title;
           $canvas.focus();
-        } else if (selection.rect == null) {
+        } else if (selection.area == null) {
           return;
         } else {
           selection.name = $canvas.title;
           $canvas.focus();
         }
       } else if (init) {
-        return selection.rect;
+        return selection.area;
         // selection.name = $canvas.title;
         // $canvas.focus();
-        // selection.rect = null;
+        // selection.area = null;
       }
     } else {
       if (selection.name === "") {
-        if (!init && selection.rect == null) return;
-        selection.rect = [0, 0, 0, 0];
+        if (!init && selection.area == null) return;
+        selection.area = [0, 0, 0, 0];
       } else {
         init = false;
       }
@@ -1493,7 +1642,7 @@ function createArchives(app) {
       $selectArea.style.width = `0px`;
       $selectArea.style.height = `0px`;
       $selectArea.classList.add("show");
-      return selection.rect;
+      return selection.area;
     }
     if (event instanceof TouchEvent && event.touches.length >= 2) {
       event.preventDefault();
@@ -1512,7 +1661,7 @@ function createArchives(app) {
     $selectArea.style.top = `${y}px`;
     $selectArea.style.width = `${w}px`;
     $selectArea.style.height = `${h}px`;
-    return (selection.rect = [x, y, w, h]);
+    return (selection.area = [x, y, w, h]);
   }
   $images.addEventListener("mousemove", drawArea);
   $images.addEventListener("mouseout", drawArea);
@@ -1522,16 +1671,16 @@ function createArchives(app) {
    *
    * @param {string} arch .
    * @param {string} type .
-   * @param {import("./types").Rect} rect .
+   * @param {Rect} area .
    */
-  function submitArea(arch, type, rect) {
+  function submitArea(arch, type, area) {
     $selectArea.classList.remove("show");
     selection.name = selection.type = "";
-    selection.rect = null;
-    // TODO
+    selection.area = null;
+    if (app.checkBusy()) return;
     switch (type) {
       case "zoom":
-        app.zoomImage(arch, rect);
+        app.zoomImage(arch, area);
         break;
       case "split":
         break;
@@ -1540,10 +1689,8 @@ function createArchives(app) {
       default:
         return;
     }
-    app.log(
-      "info",
-      `submit area, ${arch} - ${type}: ${rect.map((i) => i.toFixed(0))}`
-    );
+    app.flushDirty();
+    app.log("info", `${type} ${arch}`);
   }
   const menuItems = {
     ctrl: "Zoom area",
@@ -1553,7 +1700,7 @@ function createArchives(app) {
   /** @param {MouseEvent | TouchEvent} event . */
   const menuHandler = (event) => {
     const pass = performance.now() - selection.time;
-    const rect = pass < 300 ? null : drawArea(event);
+    const area = pass < 300 ? null : drawArea(event);
     const arch =
       selection.name === "" && event.target instanceof HTMLCanvasElement
         ? event.target.title
@@ -1573,25 +1720,25 @@ function createArchives(app) {
 
     /** @param {string} type . */
     function selectType(type) {
-      if (arch === "" || rect == null) selection.type = type;
-      else submitArea(arch, type, rect);
+      if (arch === "" || area == null) selection.type = type;
+      else submitArea(arch, type, area);
     }
     return {
       html,
       show: () => {
         // $selectArea.classList.remove("show");
         selection.name = selection.type = "";
-        selection.rect = null;
+        selection.area = null;
       },
       actions: {
         ctrl: () => selectType("zoom"),
         shift: () => selectType("split"),
         alt: () => selectType("erase"),
         click: () => {
-          if (rect == null) return;
+          if (area == null) return;
           const { name, type } = selection;
           if (type) {
-            submitArea(name, type, rect);
+            submitArea(name, type, area);
             return;
           }
           return /* show menu */ true;
