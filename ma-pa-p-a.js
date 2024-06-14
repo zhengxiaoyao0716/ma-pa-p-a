@@ -175,6 +175,13 @@ export class App extends EventTarget {
     this.dispatchEvent(new CustomEvent("updatePalette", { detail }));
   }
 
+  dirtyArchive(name, archive) {
+    const chunks = (this.dirtyChunks[name] = new Set());
+    for (let i = 0; i < archive.chunks.length; i++) {
+      chunks.add(i);
+    }
+  }
+
   /**
    * get palette.
    *
@@ -383,60 +390,38 @@ export class App extends EventTarget {
    */
   zoomImage(name, area) {
     if (this.dirtyBusy > 0) return;
+
     const archive = this.archives[name];
-    const { width, height } = archive.ctx.canvas;
-    const transFlat = [0, 0, width, height];
-    const transIter = archive.zoom == null ? transFlat : archive.zoom.rect;
-    const unitRect = calcUnitRect(archive, area);
-    const fixRatio = fixRatioRect(unitRect);
-    const rectFlat = transformRect(fixRatio, transFlat);
-    const rectIter = transformRect(fixRatio, transIter);
+    const trans =
+      archive.zoom == null ? [0, 0, ...archive.size] : archive.zoom.rect;
+    const unit = calcUnitRect(archive, area);
+    const rect = transformRect(fixRatioRect(unit), trans);
+
     if (!archive.ctx.canvas.classList.contains("zoom")) {
       archive.ctx.canvas.classList.add("zoom");
-    } else if (rectIter[2] < 128) {
+    } else if (rect[2] < 128) {
       // max scale, restore zoom
       archive.ctx.canvas.classList.remove("zoom");
+      archive.ctx.canvas.width = archive.size[0];
+      archive.ctx.canvas.height = archive.size[1];
       archive.zoom = undefined;
-      const chunks = (this.dirtyChunks[name] = new Set());
-      for (let i = 0; i < archive.chunks.length; i++) {
-        chunks.add(i);
-      }
+      this.dirtyArchive(name, archive);
       return;
     }
     if (archive.zoom == null) {
-      archive.zoom = { rect: rectIter, visible: new Map() };
+      archive.zoom = { rect: rect, visible: new Map() };
     } else {
-      archive.zoom.rect = rectIter;
+      archive.zoom.rect = rect;
     }
     const { visible } = archive.zoom;
     visible.clear();
-    for (const [index, bound, { rect }] of intersectChunks(
-      archive.chunks,
-      rectIter
-    )) {
-      visible.set(index, [
-        bound[0],
-        bound[1],
-        bound[2] - bound[0],
-        bound[3] - bound[1],
-      ]);
+    const chunks = intersectChunks(archive.chunks, rect);
+    for (const [index, intersect] of chunks) {
+      visible.set(index, intersect);
     }
-    const data = archive.ctx.getImageData(...rectFlat);
-    archive.ctx.clearRect(0, 0, width, height);
-    window.createImageBitmap(data).then((bitmap) => {
-      archive.ctx.drawImage(
-        bitmap,
-        0,
-        0,
-        bitmap.width,
-        bitmap.height,
-        0,
-        0,
-        width,
-        height
-      );
-      bitmap.close();
-    });
+    archive.ctx.canvas.width = rect[2];
+    archive.ctx.canvas.height = rect[3];
+    this.dirtyArchive(name, archive);
   }
 
   //#endregion
@@ -460,6 +445,7 @@ export class App extends EventTarget {
     /** @type {Archive} */
     const archive = {
       ctx: canvas.getContext("2d", { willReadFrequently: true }),
+      size: [64, 64],
       chunks: [],
     };
     this.archiveNum++;
@@ -467,6 +453,8 @@ export class App extends EventTarget {
     this.dispatchEvent(new CustomEvent("createImage", { detail: archive }));
 
     bitmap.then((bitmap) => {
+      archive.size[0] = bitmap.width;
+      archive.size[1] = bitmap.height;
       const { canvas } = archive.ctx;
       canvas.width = bitmap.width;
       canvas.height = bitmap.height;
@@ -475,7 +463,11 @@ export class App extends EventTarget {
       canvas.classList.remove("loading");
 
       const arch = canvas.title;
-      for (const rect of chunkRects(bitmap, this.chunkSize)) {
+      for (const rect of chunkRects(
+        bitmap.width,
+        bitmap.height,
+        this.chunkSize
+      )) {
         const source = window.createImageBitmap(bitmap, ...rect);
         const id = archive.chunks.length;
         archive.chunks.push({ rect });
@@ -942,7 +934,7 @@ function transToHsl(r, g, b, a) {
 
 //#region area processing
 
-/** @returns {[left: number, top: number, right: number, bottom: number]} */
+/** @returns {Rect} */
 function intersectBound(l0, t0, r0, b0, l1, t1, r1, b1) {
   const left = l0 < l1 ? l1 : l0;
   const right = r0 < r1 ? r0 : r1;
@@ -950,21 +942,21 @@ function intersectBound(l0, t0, r0, b0, l1, t1, r1, b1) {
   const top = t0 < t1 ? t1 : t0;
   const bottom = b0 < b1 ? b0 : b1;
   if (top > bottom) return null;
-  return [left, top, right, bottom];
+  return [left, top, right - left, bottom - top];
 }
 /**
  * iter intersect chunks.
  *
  * @param {Archive["chunks"]} chunks .
  * @param {Rect} rect .
- * @returns {Iterable<[number, ReturnType<typeof intersectBound>, Archive["chunks"][number]]>}
+ * @returns {Iterable<[number, Rect, Archive["chunks"][number]]>}
  */
 function* intersectChunks(chunks, [left, top, width, height]) {
   const right = left + width;
   const bottom = top + height;
   for (let index = 0; index < chunks.length; index++) {
     const chunk = chunks[index];
-    const bound = intersectBound(
+    const intersect = intersectBound(
       left,
       top,
       right,
@@ -974,7 +966,7 @@ function* intersectChunks(chunks, [left, top, width, height]) {
       chunk.rect[0] + chunk.rect[2],
       chunk.rect[1] + chunk.rect[3]
     );
-    if (bound) yield [index, bound, chunk];
+    if (intersect) yield [index, intersect, chunk];
   }
 }
 
@@ -1070,11 +1062,10 @@ function drawImage(ctx, output, index, [x, y, w, h], zoom) {
     return;
   }
   const [sx, sy, sw, sh] = intersect;
-  const { width, height } = ctx.canvas;
-  const dx = ((sx - zoom.rect[0]) * width) / zoom.rect[2];
-  const dy = ((sy - zoom.rect[1]) * height) / zoom.rect[3];
-  const dw = (sw * width) / zoom.rect[2];
-  const dh = (sh * height) / zoom.rect[3];
+  const dx = sx - zoom.rect[0];
+  const dy = sy - zoom.rect[1];
+  const dw = sw;
+  const dh = sh;
   ctx.clearRect(dx, dy, dw, dh);
   ctx.drawImage(output, dx, dy, dw, dh);
   output.close();
@@ -1098,13 +1089,14 @@ function dumpFile(name, url) {
 /**
  * iter chunks.
  *
- * @param {{width: number, height: number}} imageSize .
+ * @param {number} width .
+ * @param {number} height .
  * @param {number} chunkSize .
  * @returns {Iterable<Rect>} chunk rects
  */
-function* chunkRects({ width, height }, chunkSize) {
+function* chunkRects(width, height, chunkSize) {
   if (width > height) {
-    const chunks = chunkRects({ width: height, height: width });
+    const chunks = chunkRects(height, width, chunkSize);
     for (const [y, x, h, w] of chunks) {
       yield [x, y, w, h];
     }
@@ -1710,11 +1702,10 @@ function createArchives(app) {
       if (arch === "") {
         return `<label class="header hr"><span>Select editor action</span></label>`;
       }
-      const { ctx, chunks } = app.archives[arch];
-      const { width, height } = ctx.canvas;
+      const { size, chunks } = app.archives[arch];
       return `<label class="header hr">
       <span>${arch}</span>
-      <small>${width}x${height} with ${chunks.length} chunk</small>
+      <small>${size.join("x")} with ${chunks.length} chunk</small>
     </label>`;
     };
 

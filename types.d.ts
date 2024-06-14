@@ -22,6 +22,7 @@ export interface Archive {
   readonly ctx: CanvasRenderingContext2D & {
     canvas: { /*arch*/ title: string };
   };
+  readonly size: [width: number, height: number];
   readonly chunks: { readonly rect: Rect; readonly texture?: Texture }[];
   zoom?: {
     rect: Rect;

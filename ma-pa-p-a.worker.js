@@ -231,17 +231,22 @@ void main() {
    */
   chunk([x, y, w, h], visible, align, data, plte) {
     const { gl, program } = this;
-    // resize and clear view
-    gl.canvas.width = w;
-    gl.canvas.height = h;
-    gl.viewport(0, 0, w, h);
-    gl.clearColor(0.0, 0.0, 0.0, 0.0);
-    gl.clear(gl.COLOR_BUFFER_BIT);
-    gl.useProgram(program);
     const trans =
       visible == null
         ? [0, 0, w, h]
         : [visible[0] - x, visible[1] - y, visible[2], visible[3]];
+    // const width = w;
+    // const height = h;
+    const width = trans[2];
+    const height = trans[3];
+    // resize view
+    gl.canvas.width = width;
+    gl.canvas.height = height;
+    gl.viewport(0, 0, width, height);
+    // clear canvas
+    gl.clearColor(0.0, 0.0, 0.0, 0.0);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.useProgram(program);
 
     // texture0: dataTex
     gl.bindTexture(gl.TEXTURE_2D, this.textures[0]);
