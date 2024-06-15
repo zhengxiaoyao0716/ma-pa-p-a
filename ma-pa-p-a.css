@@ -47,6 +47,9 @@
   &.icon:hover {
     --color: var(--notes);
   }
+  &.icon:active {
+    --color: var(--title);
+  }
 }
 
 /* transparent grid */
@@ -146,27 +149,32 @@
       background-color: var(--color);
       box-sizing: border-box;
       pointer-events: none;
+      text-align: center;
     }
     &:hover > span {
       width: 120%;
       height: 120%;
+      font-size: 1.2em;
       left: -10%;
       top: -10%;
       border-radius: 0.3em;
     }
     &:active > span {
       border-color: var(--title);
+      color: var(--title);
     }
 
     &.cross-out > span {
       width: 70%;
       height: 70%;
+      font-size: 0.7em;
       left: 15%;
       top: 15%;
     }
     &.cross-out:hover > span {
       width: 84%;
       height: 84%;
+      font-size: 0.84em;
       left: 8%;
       top: 8%;
     }
@@ -184,11 +192,17 @@
   & > .colors[merge-color] > a {
     cursor: var(--cursor), cell;
   }
+  & > .colors > #areas {
+    display: none;
+    background-color: var(--paper);
+  }
+  & > .colors.with-create > #areas {
+    display: inline-block;
+  }
   & > #menu {
     flex: 0 0 1.5em;
     text-align: center;
     &:hover {
-      --color: var(--title);
       background-color: var(--frame);
       border-radius: 0.2em;
     }
@@ -265,7 +279,8 @@
 .mppa > #archives {
   position: relative;
   flex: 1 1 32em;
-  overflow: hidden auto;
+  /* overflow: hidden auto; */
+  overflow: hidden scroll;
   --grid-size: 16px;
 
   & > #images {
@@ -280,6 +295,7 @@
       position: relative;
       max-width: 100%;
       image-rendering: pixelated;
+      box-shadow: 0 0 1px 0 var(--notes);
       &.loading {
         width: 64px;
         height: 64px;
@@ -300,6 +316,31 @@
     &.show {
       display: block;
     }
+  }
+  & > #selected {
+    position: absolute;
+    z-index: 1;
+    pointer-events: none;
+    left: 0;
+    top: 0;
+    & > .select,
+    & > .cutout {
+      position: absolute;
+    }
+    opacity: 0.3;
+    background-color: var(--notes);
+    & > .select {
+      background-color: var(--paper);
+    }
+    & > .cutout {
+      background-color: var(--notes);
+    }
+    mix-blend-mode: multiply;
+  }
+}
+.mppa.dark > #archives {
+  & > #selected {
+    mix-blend-mode: screen;
   }
 }
 

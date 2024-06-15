@@ -154,6 +154,7 @@ export class App extends EventTarget {
       for (const chunk of chunks) {
         const { rect, texture } = archive.chunks[chunk];
         if (texture == null) continue;
+        // const visible = readyVisibleRect(archive, rect, chunk);
         const visible =
           archive.zoom == null ? null : archive.zoom.visible.get(chunk);
         if (visible === undefined) continue;
@@ -325,6 +326,11 @@ export class App extends EventTarget {
     }
   }
 
+  /** @param {string} code . */
+  createColor(code) {
+    // TODO
+  }
+
   /** @param {Palette} palette . @param {number} color . */
   _setColor(palette, color) {
     const rgba = parseRGBA(color);
@@ -434,23 +440,46 @@ export class App extends EventTarget {
   }
 
   /**
-   * erase area.
+   * select area.
    *
    * @param {string} name .
+   * @param {"select" | "cutout"} type .
    * @param {Rect} area .
    */
-  eraseArea(name, area) {
-    // TODO
-  }
-
-  /**
-   * split area.
-   *
-   * @param {string} name .
-   * @param {Rect} area .
-   */
-  splitArea(name, area) {
-    // TODO
+  selectArea(name, type, area) {
+    const archive = this.archives[name];
+    const masks = archive.mask ?? (archive.mask = []);
+    for (const mask of masks) {
+      if (mask.area == null) continue;
+      if (mask.area[0] < area[0]) continue;
+      if (mask.area[1] < area[1]) continue;
+      if (mask.area[0] + mask.area[2] > area[0] + area[2]) continue;
+      if (mask.area[1] + mask.area[3] > area[1] + area[3]) continue;
+      // wrapped
+      mask.area = null;
+    }
+    masks.push({ type, area });
+    let anyArea = false;
+    for (const mask of masks) {
+      if (mask.area == null) continue;
+      if (mask.type === "cutout") {
+        // cutout blank
+        mask.area = null;
+      } else {
+        anyArea = true;
+        break;
+      }
+    }
+    if (anyArea) {
+      this.dispatchEvent(
+        new CustomEvent("updateSelectArea", {
+          detail: { archive, type, area },
+        })
+      );
+    } else {
+      archive.mask = undefined;
+      this.dispatchEvent(new CustomEvent("updateSelectArea"));
+    }
   }
 
   /**
@@ -461,38 +490,60 @@ export class App extends EventTarget {
    */
   zoomImage(name, area) {
     if (this.dirtyBusy > 0) return;
-
     const archive = this.archives[name];
-    const trans =
-      archive.zoom == null ? [0, 0, ...archive.size] : archive.zoom.rect;
-    const unit = calcUnitRect(archive, area);
-    const rect = transformRect(fixRatioRect(unit), trans);
-
     if (!archive.ctx.canvas.classList.contains("zoom")) {
       archive.ctx.canvas.classList.add("zoom");
-    } else if (rect[2] < 128) {
-      // max scale, restore zoom
-      archive.ctx.canvas.classList.remove("zoom");
-      archive.ctx.canvas.width = archive.size[0];
-      archive.ctx.canvas.height = archive.size[1];
-      archive.zoom = undefined;
-      this.dirtyArchive(name, archive);
-      return;
     }
     if (archive.zoom == null) {
-      archive.zoom = { rect: rect, visible: new Map() };
+      archive.zoom = { area, visible: new Map() };
     } else {
-      archive.zoom.rect = rect;
+      archive.zoom.area = area;
     }
     const { visible } = archive.zoom;
     visible.clear();
-    const chunks = intersectChunks(archive.chunks, rect);
+    const chunks = intersectChunks(archive.chunks, area);
     for (const [index, intersect] of chunks) {
       visible.set(index, intersect);
     }
-    archive.ctx.canvas.width = rect[2];
-    archive.ctx.canvas.height = rect[3];
+    archive.ctx.canvas.title = `${name} ${area[2]}x${area[3]}`;
+    archive.ctx.canvas.width = area[2];
+    archive.ctx.canvas.height = area[3];
+    this.dispatchEvent(new CustomEvent("updateSelectArea"));
     this.dirtyArchive(name, archive);
+  }
+
+  /**
+   * restore zoom.
+   *
+   * @param {string} name .
+   */
+  restoreZoom(name) {
+    if (this.dirtyBusy > 0) return;
+    const archive = this.archives[name];
+    if (!archive.ctx.canvas.classList.contains("zoom")) return;
+    // max scale, restore zoom
+    archive.ctx.canvas.classList.remove("zoom");
+    archive.ctx.canvas.title = `${name} ${archive.size.join("x")}`;
+    archive.ctx.canvas.width = archive.size[0];
+    archive.ctx.canvas.height = archive.size[1];
+    archive.zoom = undefined;
+    this.dispatchEvent(new CustomEvent("updateSelectArea"));
+    this.dirtyArchive(name, archive);
+  }
+
+  /**
+   * area to rect.
+   *
+   * @param {string} name .
+   * @param {Rect} area .
+   */
+  rectToArea(name, area) {
+    const archive = this.archives[name];
+    const trans =
+      archive.zoom == null ? [0, 0, ...archive.size] : archive.zoom.area;
+    const unit = calcUnitRect(archive, area);
+    // fixRatioRect(unit)
+    return transformRect(unit, trans);
   }
 
   //#endregion
@@ -511,10 +562,12 @@ export class App extends EventTarget {
     const bitmap = window.createImageBitmap(blob);
 
     const canvas = document.createElement("canvas");
-    canvas.title = name;
+    canvas.title = `${name} 0x0`;
     canvas.classList.add("loading");
+
     /** @type {Archive} */
     const archive = {
+      name,
       ctx: canvas.getContext("2d", { willReadFrequently: true }),
       size: [64, 64],
       chunks: [],
@@ -529,11 +582,10 @@ export class App extends EventTarget {
       const { canvas } = archive.ctx;
       canvas.width = bitmap.width;
       canvas.height = bitmap.height;
-      archive.ctx.strokeStyle = "#808080";
-      archive.ctx.strokeRect(0, 0, bitmap.width, bitmap.height);
+      canvas.title = `${name} ${archive.size.join("x")}`;
       canvas.classList.remove("loading");
 
-      const arch = canvas.title;
+      const arch = archive.name;
       for (const rect of chunkRects(
         bitmap.width,
         bitmap.height,
@@ -769,6 +821,7 @@ class Dialog extends EventTarget {
   /**
    * @typedef {{
    *   html: () => string,
+   *   menu: undefined | () => {[id: string]: string},
    *   show: undefined | ($dialog: HTMLDivElement) => void,
    *   actions: undefined | {[id: string]: ($dialog: HTMLDivElement) => void},
    * }} Content
@@ -809,13 +862,12 @@ class Dialog extends EventTarget {
   /**
    * show dialog.
    *
-   * @param {{[id: string]: string | () => string}} items .
    * @param {Content} content .
    */
-  show(items, { html, show, actions }) {
-    this.$dialog.innerHTML = `${html()}${Object.entries(items)
-      .map(this.menuItem)
-      .join("")}`;
+  show({ html, menu, show, actions }) {
+    const items =
+      menu == null ? "" : Object.entries(menu()).map(this.menuItem).join("");
+    this.$dialog.innerHTML = `${html()}${items}`;
     if (show != null) show(this.$dialog);
     this._actions = actions;
     this.$dialog.classList.remove("fade-out");
@@ -831,11 +883,10 @@ class Dialog extends EventTarget {
   /**
    * bind listeners.
    *
-   * @param {HTMLAnchorElement} $trigger .
-   * @param {{[id: string]: string | () => string}} items .
-   * @param {(event: MouseEvent) => Content | undefined} handler .
+   * @param {HTMLElement} $trigger .
+   * @param {(event: MouseEvent & {currentTarget: HTMLElement}) => Content | undefined} handler .
    */
-  listen($trigger, items, handler) {
+  listen($trigger, handler) {
     /** @type {{t: number | undefined, x: number, y: number}} */
     const clickAt = { t: undefined, x: 0, y: 0 };
     const clearTimer = () => {
@@ -850,7 +901,7 @@ class Dialog extends EventTarget {
       event.preventDefault();
       event.stopPropagation();
       const content = handler(event);
-      if (content != null) this.show(items, content);
+      if (content != null) this.show(content);
     };
     $trigger.addEventListener("contextmenu", contextmenu);
     // $trigger.addEventListener("dblclick", contextmenu);
@@ -865,14 +916,17 @@ class Dialog extends EventTarget {
           Math.pow(event.x - clickAt.x, 2) + Math.pow(event.y - clickAt.y, 2);
         clearTimer();
         if (move < /* < 10^2 */ 100) {
-          this.show(items, content);
+          this.show(content);
           return;
         }
       }
-      if (content.actions == null || content.actions.length === 0) return;
       // else
       clearTimer();
 
+      if (content.actions == null || content.actions.length === 0) {
+        this.show(content);
+        return;
+      }
       for (const id in Dialog.hotkeys) {
         if (event[`${id}Key`] !== true) continue;
         const action = content.actions[id];
@@ -881,12 +935,12 @@ class Dialog extends EventTarget {
       }
       const click = content.actions["click"];
       if (click == null) {
-        this.show(items, content);
+        this.show(content);
         return;
       }
       if (!this.dblclick) {
         const show = click(this.$dialog);
-        if (show) this.show(items, content);
+        if (show) this.show(content);
         return;
       }
       clickAt.x = event.x;
@@ -894,7 +948,7 @@ class Dialog extends EventTarget {
       clickAt.t = setTimeout(() => {
         clickAt.t = undefined;
         const show = content.actions.click(this.$dialog);
-        if (show) this.show(items, content);
+        if (show) this.show(content);
       }, 200);
     });
   }
@@ -1116,6 +1170,20 @@ function transformRect([x, y, w, h], [moveX, moveY, scaleW, scaleH]) {
   ];
 }
 
+/** @param {Archive} archive . @param {Rect} rect . @param {number} chunk . */
+function readyVisibleRect({ ctx, zoom }, rect, chunk) {
+  if (zoom == null) {
+    ctx.clearRect(...rect);
+    return null;
+  }
+  const visible = zoom.visible.get(chunk);
+  if (visible == null) return;
+  const dx = visible[0] - zoom.area[0];
+  const dy = visible[1] - zoom.area[1];
+  ctx.clearRect(dx, dy, visible[2], visible[3]);
+  return visible;
+}
+
 /**
  * draw image.
  *
@@ -1137,11 +1205,9 @@ function drawImage(ctx, output, index, [x, y, w, h], zoom) {
     output.close();
     return;
   }
-  const [sx, sy, sw, sh] = intersect;
-  const dx = sx - zoom.rect[0];
-  const dy = sy - zoom.rect[1];
-  const dw = sw;
-  const dh = sh;
+  const [sx, sy, dw, dh] = intersect;
+  const dx = sx - zoom.area[0];
+  const dy = sy - zoom.area[1];
   ctx.clearRect(dx, dy, dw, dh);
   ctx.drawImage(output, dx, dy, dw, dh);
   output.close();
@@ -1287,6 +1353,26 @@ function paletteColor(layer, index, { code, color, count, layers, disable }) {
   return $color;
 }
 
+/**
+ * create color picker.
+ *
+ * @param {string} rgb .
+ * @param {string | number} alpha .
+ * @returns .
+ */
+function colorPicker(rgb, alpha) {
+  return `<div id="colorPicker">
+    <label id="rgb">
+      <input type="color" value="${rgb}" />
+      <pre>${rgb}</pre>
+    </label>
+    <label id="alpha">
+      <input type="range" min="0" max="255" value="${alpha}" />
+      <pre>A: ${alpha}</pre>
+    </label>
+  </div>`;
+}
+
 //#endregion
 
 //#region layout
@@ -1312,29 +1398,43 @@ function createTitlebar(app) {
 
   const $colors = document.createElement("div");
   $colors.classList.add("colors", "hide");
-  $colors.draggable = true;
-  $colors.addEventListener("dragstart", (event) => {
-    if (!(event.target instanceof HTMLAnchorElement)) return;
-    const code = event.target.id.slice(5);
-    event.dataTransfer.effectAllowed = "move";
-    event.dataTransfer.setData("text/plain", code);
-    event.currentTarget.setAttribute("merge-color", code);
-  });
+  /** @param {string} code . @param {string} from . */
+  function mergeColor(code, from) {
+    if (code === from) return;
+    if (app.checkBusy()) return;
+    if (from === "") {
+      app.createColor(code);
+      app.flushDirty();
+      app.log("info", `fill selection with ${code}`);
+    } else {
+      app.mergeColor(code, from);
+      app.flushDirty();
+      app.log("info", `merged color ${code} into ${from}`);
+    }
+  }
   $colors.addEventListener("drop", (event) => {
     if (!(event.target instanceof HTMLAnchorElement)) return;
+    if (!event.target.id.startsWith("color")) return;
+    if (!event.currentTarget.hasAttribute("merge-color")) return;
     event.preventDefault();
     event.stopPropagation();
     const code = event.target.id.slice(5);
-    const from = event.dataTransfer.getData("text/plain");
+    const from = event.dataTransfer.getData("text/plain").slice(5);
     event.currentTarget.removeAttribute("merge-color", code);
-    if (app.checkBusy()) return;
-    app.mergeColor(code, from);
-    app.flushDirty();
-    app.log("info", `merged ${code} into ${from}`);
+    mergeColor(code, from);
+  });
+  $colors.addEventListener("dragstart", (event) => {
+    if (!(event.target instanceof HTMLAnchorElement)) return;
+    // if (!event.target.id.startsWith("color")) return;
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", event.target.id);
+    event.currentTarget.setAttribute("merge-color", event.target.id);
   });
   /** @param {DragEvent} event . */
   function dragover(event) {
     if (!(event.target instanceof HTMLAnchorElement)) return;
+    if (!event.target.id.startsWith("color")) return;
+    if (!event.currentTarget.hasAttribute("merge-color")) return;
     event.preventDefault();
     event.stopPropagation();
     event.dataTransfer.dropEffect = "move";
@@ -1368,35 +1468,54 @@ function createTitlebar(app) {
         $upload.classList.add("hide");
         $colors.classList.remove("hide");
       }
+      const $create = document.createElement("a");
+      $create.id = "areas";
+      $create.href = "javascript:void(0);";
+      $create.innerHTML = "<span>+</span>";
+      $colors.appendChild($create);
     }
   );
-  app.dialog.listen(
-    $colors,
-    {
-      ctrl: "Focus",
-      shift: "Toggle",
-      alt: "Exclude",
-      erase: "Erase",
-      merge: () =>
-        $colors.hasAttribute("merge-color")
-          ? "Merge selected"
-          : "Merge to other",
-    },
-    ({ target: $color }) => {
-      if (!($color instanceof HTMLAnchorElement)) return;
-      const code = $color.id.slice(5);
-      const raw = `#${code.slice(0, 8).toLowerCase()}`;
-      const hex = $color.style.getPropertyValue("--color");
-      const color = Number.parseInt(hex.slice(1), 16);
-      const [r, g, b, a] = parseRGBA(color);
-      const [h, s, l, alpha] = transToHsl(r, g, b, a).map(Math.round);
+  app.addEventListener(
+    "updateSelectArea",
+    /** @param {CustomEvent<{} | null>} event . */
+    ({ detail }) => {
+      const anyArea =
+        detail != null ||
+        Object.values(app.archives).some(({ mask }) => mask != null);
+      if (anyArea) $colors.classList.add("with-create");
+      else $colors.classList.remove("with-create");
+    }
+  );
+  app.dialog.listen($colors, ({ currentTarget, target: $color }) => {
+    if (!($color instanceof HTMLAnchorElement)) return;
+    const mergeFrom = currentTarget.getAttribute("merge-color");
+    if (mergeFrom === $color.id) currentTarget.removeAttribute("merge-color");
+    if (!$color.id.startsWith("color")) {
+      // TODO
+      return {
+        html: () => `<label class="header hr">
+          <span>${1 + app.paletteNum}. Manage selection</span>
+        </label>
+        ${colorPicker("#ffffff", 1.0)}
+        <a id="submit" class="footer" href="javascript:void(0);">Create</a>`,
+        menu: () => ({
+          ctrl: "Extract",
+          shift: "Flip selected",
+          alt: "Deselect",
+          erase: "Erase",
+          merge: "Fill with other",
+        }),
+        actions: {},
+      };
+    }
+    const code = $color.id.slice(5);
+    const raw = `#${code.slice(0, 8).toLowerCase()}`;
+    const hex = $color.style.getPropertyValue("--color");
+    const color = Number.parseInt(hex.slice(1), 16);
+    const [r, g, b, a] = parseRGBA(color);
+    const [h, s, l, alpha] = transToHsl(r, g, b, a).map(Math.round);
 
-      const mergeFrom = $colors.getAttribute("merge-color");
-      if (mergeFrom && mergeFrom === code) {
-        $colors.removeAttribute("merge-color");
-      }
-
-      const html = () => `<div class="titlebar header hr">
+    const html = () => `<div class="titlebar header hr">
         <a${raw === hex ? "" : ' id="restore"'} title="Restore"
           class="color tp-grid" href="javascript:void(0);" style="--color: ${raw};"
         ></a>
@@ -1406,115 +1525,107 @@ function createTitlebar(app) {
           <small>hsl(${h}deg ${s}% ${l}% / ${alpha}%)</small>
         </label>
       </div>
-      <div id="colorPicker">
-        <label id="rgb">
-          <input type="color" value="${hex.slice(0, 7)}" />
-          <pre>${hex.slice(0, 7)}</pre>
-        </label>
-        <label id="alpha">
-          <input type="range" min="0" max="255" value="${a}" />
-          <pre>A: ${a}</pre>
-        </label>
-      </div>
+      ${colorPicker(hex.slice(0, 7), a)}
       <a id="submit" class="footer fold" href="javascript:void(0);">Submit</a>`;
+    const menu = () => ({
+      ctrl: "Focus",
+      shift: "Toggle",
+      alt: "Exclude",
+      erase: "Erase",
+      merge: mergeFrom == null ? "Merge to other" : "Merge selected",
+    });
 
-      /** @param {HTMLDivElement} $dialog . */
-      const show = ($dialog) => {
-        const $rgb = $dialog.querySelector("label#rgb>input");
-        const $alpha = $dialog.querySelector("label#alpha>input");
-        const $submit = $dialog.querySelector("#submit");
-        let dirty = color;
-        const onInput = () => {
-          const rgb = Number.parseInt($rgb.value.slice(1), 16);
-          const alpha = Number.parseInt($alpha.value);
-          dirty = rgb * 256 + alpha;
-          if (dirty !== color) $submit.classList.remove("fold");
-        };
-        $rgb.addEventListener("input", (event) => {
-          const value = event.currentTarget.value;
-          $dialog.querySelector("label#rgb>pre").innerHTML = value;
-          onInput();
-        });
-        $alpha.addEventListener("input", (event) => {
-          const value = event.currentTarget.value;
-          const text = `A: ${value.padStart(3, " ")}`;
-          $dialog.querySelector("label#alpha>pre").innerHTML = text;
-          onInput();
-        });
-        $submit.addEventListener("click", () => {
+    /** @param {HTMLDivElement} $dialog . */
+    const show = ($dialog) => {
+      const $rgb = $dialog.querySelector("label#rgb>input");
+      const $alpha = $dialog.querySelector("label#alpha>input");
+      const $submit = $dialog.querySelector("#submit");
+      let dirty = color;
+      const onInput = () => {
+        const rgb = Number.parseInt($rgb.value.slice(1), 16);
+        const alpha = Number.parseInt($alpha.value);
+        dirty = rgb * 256 + alpha;
+        if (dirty !== color) $submit.classList.remove("fold");
+      };
+      $rgb.addEventListener("input", (event) => {
+        const value = event.currentTarget.value;
+        $dialog.querySelector("label#rgb>pre").innerHTML = value;
+        onInput();
+      });
+      $alpha.addEventListener("input", (event) => {
+        const value = event.currentTarget.value;
+        const text = `A: ${value.padStart(3, " ")}`;
+        $dialog.querySelector("label#alpha>pre").innerHTML = text;
+        onInput();
+      });
+      $submit.addEventListener("click", () => {
+        if (app.checkBusy()) return;
+        app.dialog.hide();
+        app.updateColor(code, dirty);
+        app.flushDirty();
+        const hex = `#${dirty.toString(16)}`;
+        app.log("info", `color updated, code: ${code}, color: ${hex}`);
+      });
+    };
+
+    const toggle = () => {
+      if (app.checkBusy()) return;
+      const disable = !$color.classList.contains("cross-out");
+      app.toggleColor(code, disable);
+      app.flushDirty();
+      app.log("info", `color ${disable ? "disabled" : "enabled "}: ${code}`);
+    };
+    const highlight = (focus) => {
+      if (app.checkBusy()) return;
+      for (const $color of $colors.children) {
+        if (!($color instanceof HTMLAnchorElement)) continue;
+        if (!$color.id.startsWith("color")) continue;
+        const code = $color.id.slice(5);
+        const hex = $color.style.getPropertyValue("--color");
+        const color = Number.parseInt(hex.slice(1), 16);
+        app.toggleColor(code, focus);
+      }
+      app.toggleColor(code, !focus);
+      app.flushDirty();
+      app.log("info", `color ${focus ? "focused " : "excluded"}: ${code}`);
+    };
+    const restore = () => {
+      if (app.checkBusy()) return;
+      app.restoreColor(code);
+      app.flushDirty();
+      app.log("info", `color restored: ${code}`);
+    };
+    return {
+      html,
+      menu,
+      show,
+      actions: {
+        ctrl: () => highlight(true),
+        shift: toggle,
+        alt: () => highlight(false),
+        restore,
+        erase: () => {
           if (app.checkBusy()) return;
-          app.dialog.hide();
-          app.updateColor(code, dirty);
+          app.eraseColor(code);
           app.flushDirty();
-          const hex = `#${dirty.toString(16)}`;
-          app.log("info", `color updated, code: ${code}, color: ${hex}`);
-        });
-      };
-
-      const toggle = () => {
-        if (app.checkBusy()) return;
-        const disable = !$color.classList.contains("cross-out");
-        app.toggleColor(code, disable);
-        app.flushDirty();
-        app.log("info", `color ${disable ? "disabled" : "enabled "}: ${code}`);
-      };
-      const highlight = (focus) => {
-        if (app.checkBusy()) return;
-        for (const $color of $colors.children) {
-          if (!($color instanceof HTMLAnchorElement)) continue;
-          if (!$color.id.startsWith("color")) continue;
-          const code = $color.id.slice(5);
-          const hex = $color.style.getPropertyValue("--color");
-          const color = Number.parseInt(hex.slice(1), 16);
-          app.toggleColor(code, focus);
-        }
-        app.toggleColor(code, !focus);
-        app.flushDirty();
-        app.log("info", `color ${focus ? "focused " : "excluded"}: ${code}`);
-      };
-      const restore = () => {
-        if (app.checkBusy()) return;
-        app.restoreColor(code);
-        app.flushDirty();
-        app.log("info", `color restored: ${code}`);
-      };
-      return {
-        html,
-        show,
-        actions: {
-          ctrl: () => highlight(true),
-          shift: toggle,
-          alt: () => highlight(false),
-          restore,
-          erase: () => {
-            if (app.checkBusy()) return;
-            app.eraseColor(code);
-            app.flushDirty();
-            app.log("info", `erased color ${code}`);
-          },
-          merge: () => {
-            const from = $color.parentElement.getAttribute("merge-color");
-            if (from == null) {
-              $color.parentElement.setAttribute("merge-color", code);
-              const svg =
-                '<svg xmlns="http://www.w3.org/2000/svg" width="16px" height="16px" viewBox="0 0 24 24">' +
-                `<g fill="${hex}" stroke="#808080" stroke-width="4"><rect x="0" y="0" width="24" height="24" /></g></svg>`;
-              const uri = `url('data:image/svg+xml,${encodeURIComponent(
-                svg
-              )}')`;
-              $color.parentElement.style.setProperty("--cursor", uri);
-            } else {
-              $color.parentElement.removeAttribute("merge-color");
-              if (app.checkBusy()) return;
-              app.mergeColor(code, from);
-              app.flushDirty();
-              app.log("info", `merged color ${code} into ${from}`);
-            }
-          },
+          app.log("info", `erased color ${code}`);
         },
-      };
-    }
-  );
+        merge: () => {
+          if (mergeFrom == null) {
+            $color.parentElement.setAttribute("merge-color", $color.id);
+            const svg =
+              '<svg xmlns="http://www.w3.org/2000/svg" width="16px" height="16px" viewBox="0 0 24 24">' +
+              `<g fill="${hex}" stroke="#808080" stroke-width="4"><rect x="0" y="0" width="24" height="24" /></g></svg>`;
+            const uri = `url('data:image/svg+xml,${encodeURIComponent(svg)}')`;
+            $color.parentElement.style.setProperty("--cursor", uri);
+          } else {
+            $color.parentElement.removeAttribute("merge-color");
+            mergeColor(code, mergeFrom.slice(5));
+          }
+        },
+      },
+    };
+  });
 
   const $menu = document.createElement("a");
   $menu.id = "menu";
@@ -1522,18 +1633,8 @@ function createTitlebar(app) {
   $menu.title = "Expand menu";
   $menu.innerHTML = menuIcon;
   $menu.classList.add("icon");
-  app.dialog.listen(
-    $menu,
-    {
-      ctrl: "Export all",
-      palettes: "- Dump palettes",
-      archives: "- Dump archives",
-      // sort: () =>
-      //   app.sortBy === "count" ? "Sort by rainbow" : "Sort by pixel count",
-      clear: "Clear all",
-    },
-    () => {
-      const html = () => `<label class="header">
+  app.dialog.listen($menu, () => {
+    const html = () => `<label class="header">
         <span title="Prev:   ⌥ Alt + Click\nNext: ⇧ Shift + Click">
           <span>Layer:</span>
           <input id="layer" type="number" min="0"
@@ -1547,61 +1648,68 @@ function createTitlebar(app) {
         </span>
         <small>${app.paletteNum} color in ${app.archiveNum} archive</small>
       </label><a id="submit" class="footer fold">Switch layer</a>`;
+    const menu = () => ({
+      ctrl: "Export all",
+      palettes: "- Dump palettes",
+      archives: "- Dump archives",
+      sort: app.sortBy === "count" ? "Sort by rainbow" : "Sort by pixel count",
+      clear: "Clear all",
+    });
 
-      const switchLayer = (layer) => {
-        if (app.checkBusy()) return;
-        app.switchLayer(layer);
-        app.flushDirty();
-        app.log("info", `switch to layer ${app.layer}`);
-      };
-      /** @param {HTMLDivElement} $dialog . */
-      const show = ($dialog) => {
-        const $input = $dialog.querySelector("input#layer");
-        const $submit = $dialog.querySelector("#submit");
-        let layer = app.layer;
-        $input.addEventListener("input", ({ currentTarget }) => {
-          layer = Number.parseInt(currentTarget.value.trim() || "0");
-          if (layer < 0 || layer > app.layerNum) {
-            layer = app.layer;
-          } else if (layer !== app.layer) {
-            $submit.classList.remove("fold");
-          }
-        });
-        $submit.addEventListener("click", () => {
-          app.dialog.hide();
-          switchLayer(layer);
-        });
-      };
-      return {
-        html,
-        show,
-        actions: {
-          ctrl: () => app.dump().exportAll(),
-          palettes: () => app.dump().palettes(),
-          archives: () => app.dump().archives(),
-          shift: () => switchLayer(app.layer + 1),
-          alt: () => switchLayer(app.layer - 1),
-          append: () => {
-            // if (app.checkBusy()) return;
-            app.appendLayer();
-            // app.flushDirty();
-            app.log("info", `append layer at ${app.layer}`);
-          },
-          remove: () => {
-            if (app.checkBusy()) return;
-            app.removeLayer();
-            app.flushDirty();
-            app.log("info", `remove layer at ${app.layer}`);
-          },
-          clear: () => app.clearAll(),
-          sort: () => {
-            app.sortBy = app.sortBy === "count" ? "color" : "count";
-            app.flushDirty();
-          },
+    const switchLayer = (layer) => {
+      if (app.checkBusy()) return;
+      app.switchLayer(layer);
+      app.flushDirty();
+      app.log("info", `switch to layer ${app.layer}`);
+    };
+    /** @param {HTMLDivElement} $dialog . */
+    const show = ($dialog) => {
+      const $input = $dialog.querySelector("input#layer");
+      const $submit = $dialog.querySelector("#submit");
+      let layer = app.layer;
+      $input.addEventListener("input", ({ currentTarget }) => {
+        layer = Number.parseInt(currentTarget.value.trim() || "0");
+        if (layer < 0 || layer > app.layerNum) {
+          layer = app.layer;
+        } else if (layer !== app.layer) {
+          $submit.classList.remove("fold");
+        }
+      });
+      $submit.addEventListener("click", () => {
+        app.dialog.hide();
+        switchLayer(layer);
+      });
+    };
+    return {
+      html,
+      menu,
+      show,
+      actions: {
+        ctrl: () => app.dump().exportAll(),
+        palettes: () => app.dump().palettes(),
+        archives: () => app.dump().archives(),
+        shift: () => switchLayer(app.layer + 1),
+        alt: () => switchLayer(app.layer - 1),
+        append: () => {
+          // if (app.checkBusy()) return;
+          app.appendLayer();
+          // app.flushDirty();
+          app.log("info", `append layer at ${app.layer}`);
         },
-      };
-    }
-  );
+        remove: () => {
+          if (app.checkBusy()) return;
+          app.removeLayer();
+          app.flushDirty();
+          app.log("info", `remove layer at ${app.layer}`);
+        },
+        clear: () => app.clearAll(),
+        sort: () => {
+          app.sortBy = app.sortBy === "count" ? "color" : "count";
+          app.flushDirty();
+        },
+      },
+    };
+  });
 
   const $panel = document.createElement("div");
   $panel.id = "titlebar";
@@ -1627,7 +1735,8 @@ function createArchives(app) {
   app.addEventListener(
     "createImage",
     /** @param {CustomEvent<Archive>} event . */
-    ({ detail: { ctx } }) => {
+    ({ detail: { name, ctx } }) => {
+      ctx.canvas.setAttribute("data-name", name);
       $images.appendChild(ctx.canvas);
     }
   );
@@ -1647,7 +1756,7 @@ function createArchives(app) {
     type: "",
     time: 0,
     /** @type {Rect | null} */
-    area: null,
+    rect: null,
   };
   /** @param {MouseEvent | TouchEvent} event . */
   function drawArea(event, create = false) {
@@ -1655,70 +1764,69 @@ function createArchives(app) {
       // scrolling
       $selectArea.classList.remove("show");
       selection.name = "";
-      return null;
+      return false;
     }
     const $images = event.currentTarget;
-    if (!($images instanceof HTMLDivElement)) return null;
+    if (!($images instanceof HTMLDivElement)) return false;
     const mouse = event instanceof TouchEvent ? event.touches[0] : event;
-    if (mouse == null) return selection.area;
+    if (mouse == null) return selection.rect != null;
     const { left, top } = $images.getBoundingClientRect();
     const mouseX = mouse.clientX - left;
     const mouseY = mouse.clientY - top;
-    const { scrollTop } = $images.parentElement;
 
     const $canvas = event.target;
     let init = create;
     if ($canvas instanceof HTMLCanvasElement) {
-      if (selection.name === $canvas.title) {
+      const name = $canvas.getAttribute("data-name");
+      if (selection.name === name) {
         init = false;
       } else if (selection.name === "") {
         if (init) {
-          init = selection.area == null;
-          selection.name = $canvas.title;
+          init = selection.rect == null;
+          selection.name = name;
           $canvas.focus();
-        } else if (selection.area == null) {
-          return;
+        } else if (selection.rect == null) {
+          return false;
         } else {
-          selection.name = $canvas.title;
+          selection.name = name;
           $canvas.focus();
         }
       } else if (init) {
-        return selection.area;
-        // selection.name = $canvas.title;
+        return selection.rect != null;
+        // selection.name = name;
         // $canvas.focus();
         // selection.area = null;
       }
     } else {
       if (selection.name === "") {
-        if (!init && selection.area == null) return;
-        selection.area = [0, 0, 0, 0];
+        if (!init && selection.rect == null) return false;
+        selection.rect = [0, 0, 0, 0];
       } else {
         init = false;
       }
     }
     if (init) {
       selection.posX = mouseX;
-      selection.posY = mouseY + scrollTop;
+      selection.posY = mouseY;
       if (event.ctrlKey) selection.type = "zoom";
-      else if (event.shiftKey) selection.type = "split";
-      else if (event.altKey) selection.type = "erase";
+      else if (event.shiftKey) selection.type = "select";
+      else if (event.altKey) selection.type = "cutout";
       selection.time = performance.now();
       $selectArea.style.left = `${mouseX}px`;
       $selectArea.style.top = `${mouseY}px`;
-      $selectArea.style.width = `0px`;
-      $selectArea.style.height = `0px`;
+      $selectArea.style.width = "0px";
+      $selectArea.style.height = "0px";
       $selectArea.classList.add("show");
-      return selection.area;
+      return selection.rect != null;
     }
     if (event instanceof TouchEvent && event.touches.length >= 2) {
       event.preventDefault();
       event.stopPropagation();
       const { clientX, clientY } = event.touches[event.touches.length - 1];
       selection.posX = clientX - left;
-      selection.posY = clientY - top + scrollTop;
+      selection.posY = clientY - top;
     }
-    const posX = selection.posX;
-    const posY = selection.posY - scrollTop;
+    const { posX, posY } = selection;
     const [x, endX] = mouseX < posX ? [mouseX, posX] : [posX, mouseX];
     const [y, endY] = mouseY < posY ? [mouseY, posY] : [posY, mouseY];
     const w = endX - x;
@@ -1727,7 +1835,8 @@ function createArchives(app) {
     $selectArea.style.top = `${y}px`;
     $selectArea.style.width = `${w}px`;
     $selectArea.style.height = `${h}px`;
-    return (selection.area = [x, y, w, h]);
+    selection.rect = [x, y, w, h];
+    return true;
   }
   $images.addEventListener("mousemove", drawArea);
   $images.addEventListener("mouseout", drawArea);
@@ -1742,36 +1851,37 @@ function createArchives(app) {
   function submitArea(arch, type, area) {
     $selectArea.classList.remove("show");
     selection.name = selection.type = "";
-    selection.area = null;
-    if (app.checkBusy()) return;
+    selection.rect = null;
     switch (type) {
       case "zoom":
-        app.zoomImage(arch, area);
-        break;
-      case "split":
-        app.splitArea(arch, area);
-        break;
-      case "erase":
-        app.eraseArea(arch, area);
-        break;
+        if (app.checkBusy()) return;
+        if (area[2] < 64 && area[3] < 64) app.restoreZoom(arch);
+        else app.zoomImage(arch, area);
+        app.flushDirty();
+        return;
+      case "select":
+        app.selectArea(arch, "select", area);
+        return;
+      case "cutout":
+        app.selectArea(arch, "cutout", area);
+        return;
       default:
+        app.log("warn", `unknown area type: ${type}`);
         return;
     }
-    app.flushDirty();
-    app.log("info", `${type} ${arch}`);
   }
-  const menuItems = {
-    ctrl: "Zoom area",
-    shift: "Split area",
-    alt: "Erase area",
-  };
   /** @param {MouseEvent | TouchEvent} event . */
   const menuHandler = (event) => {
     const pass = performance.now() - selection.time;
-    const area = pass < 300 ? null : drawArea(event);
+    const area =
+      pass < 300
+        ? null
+        : drawArea(event)
+        ? app.rectToArea(selection.name, selection.rect)
+        : null;
     const arch =
       selection.name === "" && event.target instanceof HTMLCanvasElement
-        ? event.target.title
+        ? event.target.getAttribute("data-name")
         : selection.name;
 
     const html = () => {
@@ -1780,10 +1890,20 @@ function createArchives(app) {
       }
       const { size, chunks } = app.archives[arch];
       return `<label class="header hr">
-      <span>${arch}</span>
-      <small>${size.join("x")} with ${chunks.length} chunk</small>
-    </label>`;
+        <span>${arch}</span>
+        <small>${size.join("x")} with ${chunks.length} chunk</small>
+      </label>`;
     };
+    const menu = () => ({
+      ctrl:
+        area == null
+          ? "Zoom area"
+          : area[2] < 64 && area[3] < 64
+          ? "Restore zoom"
+          : "Zoom in area",
+      shift: "Select area",
+      alt: "Cutout area",
+    });
 
     /** @param {string} type . */
     function selectType(type) {
@@ -1792,15 +1912,16 @@ function createArchives(app) {
     }
     return {
       html,
+      menu,
       show: () => {
         // $selectArea.classList.remove("show");
         selection.name = selection.type = "";
-        selection.area = null;
+        selection.rect = null;
       },
       actions: {
         ctrl: () => selectType("zoom"),
-        shift: () => selectType("split"),
-        alt: () => selectType("erase"),
+        shift: () => selectType("select"),
+        alt: () => selectType("cutout"),
         click: () => {
           if (area == null) return;
           const { name, type } = selection;
@@ -1820,11 +1941,10 @@ function createArchives(app) {
     if (!event.cancelable) return;
     if (event.touches.length > 0) {
       const { left, top } = event.currentTarget.getBoundingClientRect();
-      const { scrollTop } = event.currentTarget.parentElement;
       const { clientX, clientY } =
         event.changedTouches[event.changedTouches.length - 1];
       selection.posX = clientX - left;
-      selection.posY = clientY - top + scrollTop;
+      selection.posY = clientY - top;
       return;
     }
     event.preventDefault();
@@ -1835,20 +1955,102 @@ function createArchives(app) {
     if (event.ctrlKey) ctrl();
     else if (event.shiftKey) shift();
     else if (event.altKey) alt();
-    else if (click()) app.dialog.show(menuItems, content);
+    else if (click()) app.dialog.show(content);
   });
   $images.addEventListener("mousedown", (event) => {
     if (event.buttons === 1) drawArea(event, true);
   });
-  app.dialog.listen($images, menuItems, menuHandler);
+  app.dialog.listen($images, menuHandler);
   app.dialog.addEventListener("hide", () => {
     $selectArea.classList.remove("show");
   });
+
+  const $selected = document.createElement("div");
+  $selected.id = "selected";
+  /** @param {Archive} archive . @param {"select" | "cutout"} type . @param {Rect} rect . */
+  function appendSelected(archive, type, rect) {
+    const { canvas } = archive.ctx;
+    const intersect = intersectBound(
+      rect[0],
+      rect[1],
+      rect[0] + rect[2],
+      rect[1] + rect[3],
+      canvas.offsetLeft,
+      canvas.offsetTop,
+      canvas.offsetLeft + canvas.offsetWidth,
+      canvas.offsetTop + canvas.offsetHeight
+    );
+    if (intersect == null) return;
+    const $item = document.createElement("div");
+    $item.classList.add(type);
+    const [x, y, w, h] = intersect;
+    $item.style.left = `${x}px`;
+    $item.style.top = `${y}px`;
+    $item.style.width = `${w}px`;
+    $item.style.height = `${h}px`;
+    $selected.appendChild($item);
+  }
+  /** @param {Archive} archive . */
+  function calcSelectedTrans(archive) {
+    const { offsetLeft, offsetTop, offsetWidth, offsetHeight } =
+      archive.ctx.canvas;
+    if (archive.zoom == null) {
+      return [
+        offsetLeft,
+        offsetTop,
+        offsetWidth / archive.size[0],
+        offsetHeight / archive.size[1],
+      ];
+    } else {
+      return [
+        offsetLeft -
+          (archive.zoom.area[0] * offsetWidth) / archive.zoom.area[2],
+        offsetTop -
+          (archive.zoom.area[1] * offsetHeight) / archive.zoom.area[3],
+        offsetWidth / archive.zoom.area[2],
+        offsetHeight / archive.zoom.area[3],
+      ];
+    }
+  }
+  app.addEventListener(
+    "updateSelectArea",
+    /** @param {CustomEvent<{ archive: Archive, type: "select" | "cutout"; area: Rect } | null>} */
+    ({ detail: mask }) => {
+      if (mask != null) {
+        const trans = calcSelectedTrans(mask.archive);
+        const rect = transformRect(mask.area, trans);
+        appendSelected(mask.archive, mask.type, rect);
+        $selected.style.width = `${$images.clientWidth}px`;
+        $selected.style.height = `${$images.clientHeight}px`;
+        return;
+      }
+      $selected.innerHTML = "";
+      let anyArea = false;
+      for (const archive of Object.values(app.archives)) {
+        if (archive.mask == null) continue;
+        const trans = calcSelectedTrans(archive);
+        for (const { type, area } of archive.mask) {
+          if (area == null) continue;
+          const rect = transformRect(area, trans);
+          appendSelected(archive, type, rect);
+          anyArea = true;
+        }
+      }
+      if (anyArea) {
+        $selected.style.width = `${$images.clientWidth}px`;
+        $selected.style.height = `${$images.clientHeight}px`;
+      } else {
+        $selected.style.width = "0px";
+        $selected.style.height = "0px";
+      }
+    }
+  );
 
   const $panel = document.createElement("div");
   $panel.id = "archives";
   $panel.appendChild($images);
   $panel.appendChild($selectArea);
+  $panel.appendChild($selected);
   return $panel;
 }
 

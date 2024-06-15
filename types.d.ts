@@ -20,15 +20,15 @@ export interface Palette {
 }
 
 export interface Archive {
-  readonly ctx: CanvasRenderingContext2D & {
-    canvas: { /*arch*/ title: string };
-  };
+  readonly name: string;
+  readonly ctx: CanvasRenderingContext2D;
   readonly size: [width: number, height: number];
   readonly chunks: { readonly rect: Rect; readonly texture?: Texture }[];
   zoom?: {
-    rect: Rect;
+    area: Rect;
     visible: Map<number, Rect>;
   };
+  mask?: { type: "select" | "cutout"; area: Rect | null }[];
 }
 
 //

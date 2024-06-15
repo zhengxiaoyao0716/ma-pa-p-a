@@ -3,5 +3,14 @@
   "version": "0.0.1",
   "author": "zhengxiaoyao0716",
   "homepage": "https://github.com/zhengxiaoyao0716/ma-pa-p-a/",
-  "license": "MIT"
+  "license": "MIT",
+  "keywords": [
+    "pixel",
+    "art",
+    "pixelart",
+    "webgl",
+    "game",
+    "gamedev",
+    "image"
+  ]
 }
