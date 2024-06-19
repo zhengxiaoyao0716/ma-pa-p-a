@@ -54,17 +54,18 @@ export interface Msg {
     resp: Texture & {
       arch: string;
       chunk: number;
+      output: Uint8ClampedArray;
       trans: [
-        output: ImageBitmap,
         count: ArrayBuffer, // [count0,count1,...]
+        output: ArrayBuffer,
         plte: ArrayBuffer,
         data: ArrayBuffer
       ];
     };
   };
 
-  updateChunk: Texture & {
-    req: {
+  updateChunk: {
+    req: Texture & {
       arch: string;
       chunk: number;
       rect: Rect;
@@ -78,20 +79,49 @@ export interface Msg {
     };
   };
 
-  dumpPalettes: {
+  extract: {
+    req: Texture & {
+      arch: string;
+      chunk: number;
+      rect: Rect;
+      visible: Rect | null | undefined;
+      mask: {
+        flag: Uint8ClampedArray; // bits of select or cutout
+        area: Uint32Array; // [left0,top0,right0,bottom0,...]
+        code: string;
+        color: number;
+      };
+      mapper: Uint8ClampedArray; // [rawIndex: remapTo]
+      trans: [mapper: ArrayBuffer, plte: ArrayBuffer, data: ArrayBuffer];
+    };
+    resp: Texture & {
+      arch: string;
+      chunk: number;
+      mask?: {
+        code: string;
+        count: number;
+        offset: number;
+      };
+      trans:
+        | [output: ImageBitmap, plte: ArrayBuffer, data: ArrayBuffer]
+        | [plte: ArrayBuffer, data: ArrayBuffer];
+    };
+  };
+
+  exportSkin: {
     req: {
       name: string;
-      plte: Uint8ClampedArray;
+      skin: Uint8ClampedArray;
       width: number;
       height: number;
-      trans: [plte: ArrayBuffer];
+      trans: [skin: ArrayBuffer];
     };
     resp: {
       name: string;
       url: string;
     };
   };
-  dumpArchives: {
+  exportData: {
     req: {
       name: string;
       data: Uint8ClampedArray;

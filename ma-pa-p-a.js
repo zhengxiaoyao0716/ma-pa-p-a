@@ -56,12 +56,12 @@ export class App extends EventTarget {
       this.log("info", "TODO on parsed gzip", name, buffer);
     },
 
-    parseImage: ({ arch, chunk, data, plte, trans: [output, count] }) => {
-      const colorNum = plte.byteLength >> 2;
-      if (colorNum > 256) {
+    parseImage: ({ arch, chunk, output, data, plte, trans: [count] }) => {
+      const overColor = this.checkOverColors(plte);
+      if (overColor !== false) {
         this.log(
           "error",
-          `too many colors, name: ${arch}, limit: ${256}, count: ${colorNum}+`
+          `too many colors, name: ${arch}, limit: ${256}, count: ${overColor}+`
         );
         return;
       }
@@ -81,7 +81,8 @@ export class App extends EventTarget {
       }
       const detail = this.iterPalettes(this.sortedPalettes());
       this.dispatchEvent(new CustomEvent("updatePalette", { detail }));
-      drawImage(ctx, output, chunk, rect, zoom);
+      const imageData = new ImageData(output, rect[2], rect[3]);
+      ctx.putImageData(imageData, rect[0], rect[1]);
     },
 
     updateChunk: ({ arch, chunk, data, plte, trans: [output] }) => {
@@ -90,11 +91,34 @@ export class App extends EventTarget {
       const { rect } = chunks[chunk];
       chunks[chunk] = { rect, texture: { data, plte } };
       drawImage(ctx, output, chunk, rect, zoom);
+      output.close();
     },
 
-    dumpPalettes: ({ name, url }) => {
+    extract: ({ arch, chunk, data, plte, mask, trans: [output] }) => {
+      this.dirtyBusy--;
+      const { ctx, chunks, zoom } = this.archives[arch];
+      const { rect } = chunks[chunk];
+      chunks[chunk] = { rect, texture: { data, plte } };
+      if (output instanceof ImageBitmap) {
+        drawImage(ctx, output, chunk, rect, zoom);
+        output.close();
+      }
+      if (mask == null) return;
+      const palette = this.getPalette(mask.code);
+      if (palette == null) return;
+      palette.count += mask.count;
+      const refer = palette.refer[arch] ?? (palette.refer[arch] = []);
+      refer.push({ chunk, offset: mask.offset });
+      const detail = this.iterPalettes(this.sortedPalettes());
+      this.dispatchEvent(new CustomEvent("updatePalette", { detail }));
+    },
+
+    exportSkin: ({ name, url }) => {
       dumpFile(name, url);
       setTimeout(() => URL.revokeObjectURL(url), 0);
+    },
+    exportData: ({}) => {
+      // TODO
     },
   };
 
@@ -197,8 +221,8 @@ export class App extends EventTarget {
     return parent.split[i];
   }
 
-  /** @param {number} color . */
-  computePalette(color) {
+  /** @param {number} color . @param {boolean} [force=false] force create new. */
+  computePalette(color, force = false) {
     const code = color.toString(16).toUpperCase().padStart(8, "0");
     const palette = this.palettes[code];
     if (palette == null) {
@@ -220,7 +244,11 @@ export class App extends EventTarget {
         palette.refer = {};
         palette.layers = [];
         return palette;
-      } else if (!palette.disable && palette.layers[this.layer] === undefined) {
+      } else if (
+        !force &&
+        !palette.disable &&
+        palette.layers[this.layer] === undefined
+      ) {
         return palette;
       }
       palette.code = `${code}00`;
@@ -228,10 +256,12 @@ export class App extends EventTarget {
     }
     /** @type {{color: number, count: number, split: Palette[]}} */
     const parent = this.palettes[code];
-    for (const palette of parent.split) {
-      if (palette.code === "") continue; // removed
-      if (!palette.disable && palette.layers[this.layer] === undefined) {
-        return palette;
+    if (!force) {
+      for (const child of parent.split) {
+        if (child.code === "") continue;
+        else if (child.disable) continue;
+        else if (child.layers[this.layer] !== undefined) continue;
+        return child;
       }
     }
     this.paletteNum++;
@@ -257,6 +287,30 @@ export class App extends EventTarget {
     };
     parent.split.push(children);
     return children;
+  }
+
+  /** @param {Uint8ClampedArray} plte . */
+  checkOverColors(plte) {
+    const added = plte.byteLength >> 2;
+    if (added > 256) return added;
+    let colorNum = added + this.paletteNum;
+    if (colorNum <= 256) return false;
+    const colors = new DataView(plte.buffer);
+    for (let i = 0; i < colors.byteLength; i += 4) {
+      const color = colors.getUint32(i);
+      const code = color.toString(16).toUpperCase().padStart(8, "0");
+      const palette = this.palettes[code];
+      if (palette == null) continue;
+      const palettes = "code" in palette ? [palette] : palette.split;
+      for (const child of palettes) {
+        if (child.code === "") continue;
+        else if (child.disable) continue;
+        else if (child.layers[this.layer] !== undefined) continue;
+      }
+      // same color
+      colorNum--;
+    }
+    return colorNum <= 256;
   }
 
   /** @param {string} code . */
@@ -327,8 +381,108 @@ export class App extends EventTarget {
   }
 
   /** @param {string} code . */
-  createColor(code) {
-    // TODO
+  mergeSelected(code) {
+    if (this.dirtyBusy > 0) return;
+    const palette = this.getPalette(code);
+    if (palette == null) return;
+    this.extractColor(palette);
+  }
+
+  /** @param {number} color . */
+  createColor(color) {
+    if (this.paletteNum.length >= 256) {
+      this.log("warn", `too many colors, limit: ${256}`);
+      return;
+    }
+    if (this.dirtyBusy > 0) return;
+    const palette = this.computePalette(color, true);
+    this.extractColor(palette);
+  }
+
+  /** @param {Palette} palette . */
+  extractColor(palette) {
+    const code = palette.code;
+    /** @type {{[arch: string]: Map<number, Set<number>>}} */
+    const enableColorsDict = {};
+    for (const palette of this.iterPalettes(this.sortedPalettes())) {
+      if (palette.disable || palette.code === code) continue;
+      for (const [arch, refer] of Object.entries(palette.refer)) {
+        const indexes =
+          enableColorsDict[arch] ?? (enableColorsDict[arch] = new Map());
+        for (const { chunk, offset } of refer) {
+          if (!indexes.has(chunk)) indexes.set(chunk, new Set());
+          indexes.get(chunk).add(/* color index */ offset >> 2);
+        }
+      }
+    }
+    for (const archive of Object.values(this.archives)) {
+      if (archive.mask == null) continue;
+      const arch = archive.name;
+      /** @type {number[]} */ const flags = [];
+      /** @type {number[]} */ const areas = [];
+      let count = 0;
+      for (const { type, area } of archive.mask) {
+        if (area == null) continue;
+        const index = count >> 3;
+        const offset = count++ & 0b111;
+        if (offset === 0b000) flags.push(0);
+        if (type === "cutout") {
+          flags[index] |= 1 << offset;
+        }
+        areas.push(area[0], area[1], area[0] + area[2], area[1] + area[3]);
+      }
+      const mask = {
+        flag: new Uint8ClampedArray(flags),
+        area: new Uint32Array(areas),
+        code,
+        color: palette.layers[this.layer] ?? palette.color,
+      };
+      const enableColors = enableColorsDict[arch];
+      /** @type {Map<number, number>} */
+      const remapToDict = new Map();
+      if (arch in palette.refer) {
+        const refer = palette.refer[arch];
+        for (const { chunk, offset } of refer) {
+          remapToDict.set(chunk, /* color index */ offset >> 2);
+        }
+      }
+      for (let chunk = 0; chunk < archive.chunks.length; chunk++) {
+        const { rect, texture } = archive.chunks[chunk];
+        if (texture == null) continue;
+        const visible =
+          archive.zoom == null ? null : archive.zoom.visible.get(chunk);
+        const { data, plte } = texture;
+        if (plte.length >= 256) {
+          this.log("warn", `too many colors, name: ${arch}, limit: ${256}`);
+          continue;
+        }
+        const colorNum = plte.byteLength >> 2;
+        const remapTo = remapToDict.get(chunk) ?? colorNum;
+        const mapper = new Uint8ClampedArray(1 + colorNum).fill(255);
+        mapper[colorNum] = remapTo;
+        if (enableColors != null) {
+          const indexes = enableColors.get(chunk);
+          if (indexes != null) {
+            for (const index of indexes) {
+              mapper[index] = remapTo;
+            }
+          }
+        }
+        this.dirtyBusy++;
+        this.request("extract", {
+          arch,
+          chunk,
+          rect,
+          visible,
+          data,
+          plte,
+          mask,
+          mapper,
+          trans: [mapper.buffer, plte.buffer, data.buffer],
+        });
+      }
+    }
+    this.deselectAll();
   }
 
   /** @param {Palette} palette . @param {number} color . */
@@ -439,6 +593,44 @@ export class App extends EventTarget {
     }
   }
 
+  deselectAll() {
+    for (const archive of Object.values(this.archives)) {
+      archive.mask = undefined;
+    }
+    this.dispatchEvent(new CustomEvent("updateSelectArea"));
+  }
+
+  flipSelected() {
+    for (const archive of Object.values(this.archives)) {
+      if (archive.mask == null || archive.mask.length === 0) continue;
+      const first = archive.mask[0];
+      if (first.type === "cutout" || first.area == null) {
+        first.type = "select";
+        first.area = [0, 0, archive.size[0], archive.size[1]];
+      } else if (
+        first.type === "select" &&
+        first.area[0] === 0 &&
+        first.area[1] === 0 &&
+        first.area[2] === archive.size[0] &&
+        first.area[3] === archive.size[1]
+      ) {
+        first.type = "cutout";
+        first.area = null;
+      } else {
+        archive.mask.unshift({
+          type: "select",
+          area: [0, 0, archive.size[0], archive.size[1]],
+        });
+      }
+      for (let i = 1; i < archive.mask.length; i++) {
+        const mask = archive.mask[i];
+        mask.type = mask.type === "select" ? "cutout" : "select";
+      }
+      this.cleanMasks(archive);
+    }
+    this.dispatchEvent(new CustomEvent("updateSelectArea"));
+  }
+
   /**
    * select area.
    *
@@ -459,17 +651,7 @@ export class App extends EventTarget {
       mask.area = null;
     }
     masks.push({ type, area });
-    let anyArea = false;
-    for (const mask of masks) {
-      if (mask.area == null) continue;
-      if (mask.type === "cutout") {
-        // cutout blank
-        mask.area = null;
-      } else {
-        anyArea = true;
-        break;
-      }
-    }
+    const anyArea = this.cleanMasks(archive);
     if (anyArea) {
       this.dispatchEvent(
         new CustomEvent("updateSelectArea", {
@@ -477,9 +659,21 @@ export class App extends EventTarget {
         })
       );
     } else {
-      archive.mask = undefined;
       this.dispatchEvent(new CustomEvent("updateSelectArea"));
     }
+  }
+
+  /** @param {Archive} archive . */
+  cleanMasks(archive) {
+    if (archive.mask == null) return false;
+    for (let i = 0; i < archive.mask.length; i++) {
+      const mask = archive.mask[i];
+      if (mask.type === "cutout" || mask.area == null) continue;
+      if (i > 0) archive.mask = archive.mask.slice(i);
+      return true;
+    }
+    archive.mask = undefined;
+    return false;
   }
 
   /**
@@ -568,7 +762,7 @@ export class App extends EventTarget {
     /** @type {Archive} */
     const archive = {
       name,
-      ctx: canvas.getContext("2d", { willReadFrequently: true }),
+      ctx: canvas.getContext("2d"),
       size: [64, 64],
       chunks: [],
     };
@@ -678,53 +872,48 @@ export class App extends EventTarget {
   dump() {
     const palettes = Array.from(this.iterPalettes(this.sortedPalettes()));
     const origin = palettes.map(({ color }) => parseRGBA(color));
-    const colors = palettes.flatMap(({ layers: [dirty] }, i) =>
+    let colors = palettes.flatMap(({ layers: [dirty] }, i) =>
       dirty == null ? origin[i] : parseRGBA(dirty)
     );
     const rowSize = colors.length;
-    let length = rowSize;
     for (let j = 1; j <= this.layerNum; j++) {
       let regress = true;
       for (let i = 0; i < palettes.length; i++) {
         const dirty = palettes[i].layers[j];
         if (dirty === undefined) {
-          const color = origin[i];
-          for (const value of color) {
-            colors[length++] = value;
-          }
+          colors.push(...origin[i]);
         } else {
           regress = false;
-          for (const value of parseRGBA(dirty)) {
-            colors[length++] = value;
-          }
+          colors.push(...parseRGBA(dirty));
         }
       }
-      if (regress) length -= rowSize;
+      // if (regress) colors.length -= rowSize;
+      if (regress) colors = colors.slice(0, -rowSize);
     }
-    const plte = new Uint8ClampedArray(colors.slice(0, length));
+    const skin = new Uint8ClampedArray(colors);
     const width = palettes.length;
-    const height = plte.length / width / 4;
+    const height = skin.length / width / 4;
     const salt = (new Date().getTime() & 0xffffff)
       .toString(16)
       .padStart(6, "0");
-    const dumpPalettes = () => {
-      this.request("dumpPalettes", {
-        name: `mppa-${salt}_${width}x${height}.plte`,
-        plte,
+    const exportSkin = () => {
+      this.request("exportSkin", {
+        name: `mppa-${salt}_${width}x${height}.skin`,
+        skin,
         width,
         height,
-        trans: [plte.buffer],
+        trans: [skin.buffer],
       });
     };
-    const dumpArchives = () => {
+    const exportData = () => {
       // TODO
     };
     return {
-      palettes: dumpPalettes,
-      archives: dumpArchives,
-      exportAll: () => {
-        dumpPalettes();
-        dumpArchives();
+      skin: exportSkin,
+      data: exportData,
+      all: () => {
+        exportSkin();
+        exportData();
       },
     };
   }
@@ -779,7 +968,7 @@ class WorkerService {
   constructor() {
     this.id = WorkerService._indexer++;
     const name = `MaPaPA-Worker#${this.id}`;
-    this.worker = new Worker(WorkerService.workerUrl, { name });
+    this.worker = new Worker(WorkerService.workerUrl, { name, type: "module" });
   }
 
   _taskCount = 0;
@@ -1197,20 +1386,15 @@ function drawImage(ctx, output, index, [x, y, w, h], zoom) {
   if (zoom == null) {
     ctx.clearRect(x, y, w, h);
     ctx.drawImage(output, x, y, w, h);
-    output.close();
     return;
   }
   const intersect = zoom.visible.get(index);
-  if (intersect == null) {
-    output.close();
-    return;
-  }
+  if (intersect == null) return;
   const [sx, sy, dw, dh] = intersect;
   const dx = sx - zoom.area[0];
   const dy = sy - zoom.area[1];
   ctx.clearRect(dx, dy, dw, dh);
   ctx.drawImage(output, dx, dy, dw, dh);
-  output.close();
 }
 
 //#endregion
@@ -1353,24 +1537,60 @@ function paletteColor(layer, index, { code, color, count, layers, disable }) {
   return $color;
 }
 
-/**
- * create color picker.
- *
- * @param {string} rgb .
- * @param {string | number} alpha .
- * @returns .
- */
-function colorPicker(rgb, alpha) {
-  return `<div id="colorPicker">
-    <label id="rgb">
-      <input type="color" value="${rgb}" />
-      <pre>${rgb}</pre>
-    </label>
-    <label id="alpha">
-      <input type="range" min="0" max="255" value="${alpha}" />
-      <pre>A: ${alpha}</pre>
-    </label>
-  </div>`;
+function colorPicker() {
+  /** @type {number | undefined} */ let dirty;
+  return {
+    /** @param {string} rgb . @param {string | number} alpha . */
+    html: (rgb, alpha) => `<div id="colorPicker" class="hr">
+      <label id="rgb">
+        <input type="color" value="${rgb}" />
+        <pre>${rgb}</pre>
+      </label>
+      <label id="alpha">
+        <input type="range" min="0" max="255" value="${alpha}" />
+        <pre>A: ${alpha}</pre>
+      </label>
+    </div>`,
+    get dirty() {
+      return dirty;
+    },
+    /** @param {HTMLDivElement} $dialog . @param {($dialog: HTMLDivElement, color: number) => void} [onInput] . */
+    handle: ($dialog, onInput) => {
+      const $rgb = $dialog.querySelector("label#rgb>input");
+      const $alpha = $dialog.querySelector("label#alpha>input");
+      $rgb.addEventListener("input", (event) => {
+        const value = event.currentTarget.value;
+        $dialog.querySelector("label#rgb>pre").innerHTML = value;
+        const rgb = Number.parseInt(value.slice(1), 16);
+        const alpha = Number.parseInt($alpha.value);
+        dirty = ((rgb << 8) >>> 0) + alpha;
+        if (onInput != null) onInput($dialog, dirty);
+      });
+      $alpha.addEventListener("input", (event) => {
+        const value = event.currentTarget.value;
+        const text = `A: ${value.padStart(3, " ")}`;
+        $dialog.querySelector("label#alpha>pre").innerHTML = text;
+        const rgb = Number.parseInt($rgb.value.slice(1), 16);
+        const alpha = Number.parseInt(value);
+        dirty = ((rgb << 8) >>> 0) + alpha;
+        if (onInput != null) onInput($dialog, dirty);
+      });
+    },
+  };
+}
+/** @param {string} selector . */
+function colorPickerSubmit(selector) {
+  /** @param {HTMLDivElement} $dialog . */
+  return ($dialog) => {
+    const $colorPicker = $dialog.querySelector("#colorPicker");
+    if ($colorPicker == null) return;
+    const $submit = $dialog.querySelector(selector);
+    if ($submit == null) return;
+    $submit.classList.add("footer");
+    $colorPicker.classList.remove("hr");
+    const $span = $submit.querySelector("span") ?? $submit;
+    $span.innerHTML = "Submit";
+  };
 }
 
 //#endregion
@@ -1403,9 +1623,9 @@ function createTitlebar(app) {
     if (code === from) return;
     if (app.checkBusy()) return;
     if (from === "") {
-      app.createColor(code);
+      app.mergeSelected(code);
       app.flushDirty();
-      app.log("info", `fill selection with ${code}`);
+      app.log("info", `merge selection into ${code}`);
     } else {
       app.mergeColor(code, from);
       app.flushDirty();
@@ -1488,24 +1708,51 @@ function createTitlebar(app) {
   );
   app.dialog.listen($colors, ({ currentTarget, target: $color }) => {
     if (!($color instanceof HTMLAnchorElement)) return;
-    const mergeFrom = currentTarget.getAttribute("merge-color");
-    if (mergeFrom === $color.id) currentTarget.removeAttribute("merge-color");
     if (!$color.id.startsWith("color")) {
-      // TODO
+      currentTarget.removeAttribute("merge-color");
+      const picker = colorPicker();
+      const storeKey = "ma-pa-p-a/selection-color";
+      const hex = window.localStorage.getItem(storeKey) ?? "#ffffffff";
       return {
         html: () => `<label class="header hr">
           <span>${1 + app.paletteNum}. Manage selection</span>
         </label>
-        ${colorPicker("#ffffff", 1.0)}
-        <a id="submit" class="footer" href="javascript:void(0);">Create</a>`,
+        ${picker.html(hex.slice(0, 7), Number.parseInt(hex.slice(7), 16))}`,
         menu: () => ({
-          ctrl: "Extract",
+          ctrl: "Create",
           shift: "Flip selected",
           alt: "Deselect",
           erase: "Erase",
           merge: "Fill with other",
         }),
-        actions: {},
+        show: ($dialog) => picker.handle($dialog, colorPickerSubmit("#ctrl")),
+        actions: {
+          ctrl: () => {
+            if (app.checkBusy()) return;
+            const dirty = picker.dirty ?? Number.parseInt(hex.slice(1), 16);
+            const text = `#${dirty.toString(16).padStart(8, "0")}`;
+            if (hex !== text) localStorage.setItem(storeKey, text);
+            app.dialog.hide();
+            app.createColor(dirty);
+            app.log("info", `fill selection with #${dirty.toString(16)}`);
+          },
+          shift: () => app.flipSelected(),
+          alt: () => app.deselectAll(),
+          erase: () => {
+            if (app.checkBusy()) return;
+            app.createColor(0x00000000);
+            app.log("info", "erase selection pixels");
+          },
+          merge: () => {
+            $color.parentElement.setAttribute("merge-color", $color.id);
+            const svg =
+              '<svg xmlns="http://www.w3.org/2000/svg" width="16px" height="16px" viewBox="0 0 24 24">' +
+              '<g fill="transparent"><rect stroke="#808080" stroke-width="4" x="0" y="0" width="24" height="24" />' +
+              '<text fill="#808080" font-size="18" x="5" y="17">+</text></g></svg>';
+            const uri = `url('data:image/svg+xml,${encodeURIComponent(svg)}')`;
+            $color.parentElement.style.setProperty("--cursor", uri);
+          },
+        },
       };
     }
     const code = $color.id.slice(5);
@@ -1515,6 +1762,7 @@ function createTitlebar(app) {
     const [r, g, b, a] = parseRGBA(color);
     const [h, s, l, alpha] = transToHsl(r, g, b, a).map(Math.round);
 
+    const picker = colorPicker();
     const html = () => `<div class="titlebar header hr">
         <a${raw === hex ? "" : ' id="restore"'} title="Restore"
           class="color tp-grid" href="javascript:void(0);" style="--color: ${raw};"
@@ -1525,8 +1773,13 @@ function createTitlebar(app) {
           <small>hsl(${h}deg ${s}% ${l}% / ${alpha}%)</small>
         </label>
       </div>
-      ${colorPicker(hex.slice(0, 7), a)}
-      <a id="submit" class="footer fold" href="javascript:void(0);">Submit</a>`;
+      ${picker.html(hex.slice(0, 7), a)}`;
+
+    let mergeFrom = currentTarget.getAttribute("merge-color");
+    if (mergeFrom === $color.id) {
+      currentTarget.removeAttribute("merge-color");
+      mergeFrom = null;
+    }
     const menu = () => ({
       ctrl: "Focus",
       shift: "Toggle",
@@ -1534,39 +1787,6 @@ function createTitlebar(app) {
       erase: "Erase",
       merge: mergeFrom == null ? "Merge to other" : "Merge selected",
     });
-
-    /** @param {HTMLDivElement} $dialog . */
-    const show = ($dialog) => {
-      const $rgb = $dialog.querySelector("label#rgb>input");
-      const $alpha = $dialog.querySelector("label#alpha>input");
-      const $submit = $dialog.querySelector("#submit");
-      let dirty = color;
-      const onInput = () => {
-        const rgb = Number.parseInt($rgb.value.slice(1), 16);
-        const alpha = Number.parseInt($alpha.value);
-        dirty = rgb * 256 + alpha;
-        if (dirty !== color) $submit.classList.remove("fold");
-      };
-      $rgb.addEventListener("input", (event) => {
-        const value = event.currentTarget.value;
-        $dialog.querySelector("label#rgb>pre").innerHTML = value;
-        onInput();
-      });
-      $alpha.addEventListener("input", (event) => {
-        const value = event.currentTarget.value;
-        const text = `A: ${value.padStart(3, " ")}`;
-        $dialog.querySelector("label#alpha>pre").innerHTML = text;
-        onInput();
-      });
-      $submit.addEventListener("click", () => {
-        if (app.checkBusy()) return;
-        app.dialog.hide();
-        app.updateColor(code, dirty);
-        app.flushDirty();
-        const hex = `#${dirty.toString(16)}`;
-        app.log("info", `color updated, code: ${code}, color: ${hex}`);
-      });
-    };
 
     const toggle = () => {
       if (app.checkBusy()) return;
@@ -1598,9 +1818,22 @@ function createTitlebar(app) {
     return {
       html,
       menu,
-      show,
+      show: ($dialog) => picker.handle($dialog, colorPickerSubmit("#ctrl")),
       actions: {
-        ctrl: () => highlight(true),
+        ctrl: () => {
+          const { dirty } = picker;
+          if (dirty == null) {
+            highlight(true);
+            return;
+          }
+          if (dirty == null) return;
+          if (app.checkBusy()) return;
+          app.dialog.hide();
+          app.updateColor(code, dirty);
+          app.flushDirty();
+          const hex = `#${dirty.toString(16)}`;
+          app.log("info", `color updated, code: ${code}, color: ${hex}`);
+        },
         shift: toggle,
         alt: () => highlight(false),
         restore,
@@ -1635,7 +1868,7 @@ function createTitlebar(app) {
   $menu.classList.add("icon");
   app.dialog.listen($menu, () => {
     const html = () => `<label class="header">
-        <span title="Prev:   ⌥ Alt + Click\nNext: ⇧ Shift + Click">
+        <span title="Prev:   ${Dialog.hotkeys.alt}\nNext: ${Dialog.hotkeys.shift}">
           <span>Layer:</span>
           <input id="layer" type="number" min="0"
             max="${app.layerNum}" value="${app.layer}">
@@ -1646,12 +1879,12 @@ function createTitlebar(app) {
             <button id="append" title="Append layer">+</button>
           </span>
         </span>
-        <small>${app.paletteNum} color in ${app.archiveNum} archive</small>
+        <small>${app.paletteNum} color in ${app.archiveNum} image</small>
       </label><a id="submit" class="footer fold">Switch layer</a>`;
     const menu = () => ({
       ctrl: "Export all",
-      palettes: "- Dump palettes",
-      archives: "- Dump archives",
+      skin: "- Export skin",
+      data: "- Export data",
       sort: app.sortBy === "count" ? "Sort by rainbow" : "Sort by pixel count",
       clear: "Clear all",
     });
@@ -1685,9 +1918,9 @@ function createTitlebar(app) {
       menu,
       show,
       actions: {
-        ctrl: () => app.dump().exportAll(),
-        palettes: () => app.dump().palettes(),
-        archives: () => app.dump().archives(),
+        ctrl: () => app.dump().all(),
+        skin: () => app.dump().skin(),
+        data: () => app.dump().data(),
         shift: () => switchLayer(app.layer + 1),
         alt: () => switchLayer(app.layer - 1),
         append: () => {
@@ -1855,7 +2088,7 @@ function createArchives(app) {
     switch (type) {
       case "zoom":
         if (app.checkBusy()) return;
-        if (area[2] < 64 && area[3] < 64) app.restoreZoom(arch);
+        if (area[2] < 16 && area[3] < 16) app.restoreZoom(arch);
         else app.zoomImage(arch, area);
         app.flushDirty();
         return;
@@ -1877,7 +2110,9 @@ function createArchives(app) {
       pass < 300
         ? null
         : drawArea(event)
-        ? app.rectToArea(selection.name, selection.rect)
+        ? selection.name === ""
+          ? null
+          : app.rectToArea(selection.name, selection.rect)
         : null;
     const arch =
       selection.name === "" && event.target instanceof HTMLCanvasElement
@@ -1898,7 +2133,7 @@ function createArchives(app) {
       ctrl:
         area == null
           ? "Zoom area"
-          : area[2] < 64 && area[3] < 64
+          : area[2] < 16 && area[3] < 16
           ? "Restore zoom"
           : "Zoom in area",
       shift: "Select area",
@@ -1967,8 +2202,13 @@ function createArchives(app) {
 
   const $selected = document.createElement("div");
   $selected.id = "selected";
-  /** @param {Archive} archive . @param {"select" | "cutout"} type . @param {Rect} rect . */
+  /** @param {Archive} archive . @param {"select" | "cutout"} type . @param {Rect | null} rect . */
   function appendSelected(archive, type, rect) {
+    const $item = document.createElement("div");
+    $item.classList.add(type);
+    $item.setAttribute("data-arch", archive.name);
+    $selected.appendChild($item);
+    if (rect == null) return;
     const { canvas } = archive.ctx;
     const intersect = intersectBound(
       rect[0],
@@ -1981,14 +2221,11 @@ function createArchives(app) {
       canvas.offsetTop + canvas.offsetHeight
     );
     if (intersect == null) return;
-    const $item = document.createElement("div");
-    $item.classList.add(type);
     const [x, y, w, h] = intersect;
     $item.style.left = `${x}px`;
     $item.style.top = `${y}px`;
     $item.style.width = `${w}px`;
     $item.style.height = `${h}px`;
-    $selected.appendChild($item);
   }
   /** @param {Archive} archive . */
   function calcSelectedTrans(archive) {
@@ -2028,12 +2265,11 @@ function createArchives(app) {
       let anyArea = false;
       for (const archive of Object.values(app.archives)) {
         if (archive.mask == null) continue;
+        anyArea = true;
         const trans = calcSelectedTrans(archive);
         for (const { type, area } of archive.mask) {
-          if (area == null) continue;
-          const rect = transformRect(area, trans);
+          const rect = area == null ? null : transformRect(area, trans);
           appendSelected(archive, type, rect);
-          anyArea = true;
         }
       }
       if (anyArea) {

@@ -1,3 +1,7 @@
+/**
+ * @typedef {import("./types").Rect} Rect
+ */
+
 /** @type {import("./types").MsgRouters} */
 const routers = {
   parseGzip: async ({ url, name }) => {
@@ -8,37 +12,73 @@ const routers = {
   },
 
   parseImage: async ({ arch, chunk, trans: [source] }) => {
+    const service = await services.image;
+    const output = new Uint8ClampedArray((source.width * source.height) << 2);
     /** @type {Map<number, number>} {color: count} */ const counter = new Map();
     /** @type {Map<number, number>} {color: index} */ const indexer = new Map();
-    const { width, height } = source;
-    const align = alignWidth(width);
-
-    const data = services.canvas.parse(source, counter, indexer, align);
+    const data = service.parse(source, output, counter, indexer);
     const plte = new Uint8ClampedArray(indexer.size << 2);
     const count = new Uint32Array(indexer.size);
     for (const [color, index] of indexer.entries()) {
       plte.set(parseRGBA(color), index << 2);
       count[index] = counter.get(color);
     }
-    const rect = [0, 0, width, height];
-    const output = services.webgl2.chunk(rect, null, align, data, plte);
-    const trans = [output, count.buffer, plte.buffer, data.buffer];
-    return { arch, chunk, data, plte, trans };
+    const trans = [count.buffer, plte.buffer, data.buffer, output.buffer];
+    return { arch, chunk, output, data, plte, trans };
   },
 
   updateChunk: async ({ arch, chunk, rect, visible, data, plte }) => {
-    const align = alignWidth(rect[2]);
-    const output = services.webgl2.chunk(rect, visible, align, data, plte);
+    const service = await services.color;
+    const output = service.chunk(rect, visible, data, plte);
     const trans = [output, plte.buffer, data.buffer];
     return { arch, chunk, data, plte, trans };
   },
 
-  dumpPalettes: async ({ name, plte, width, height }) => {
-    // return { name: `${name}.mppa`, url: URL.createObjectURL(new Blob([plte])) };
-    const url = services.canvas.dump(plte, width, height, "png");
+  extract: async ({ arch, chunk, rect, visible, data, plte, mask, mapper }) => {
+    const mapped = (await services.remap).chunk(rect, data, mask, mapper);
+    const remapTo = mapper[mapper.length - 1];
+    let count = 0;
+    for (const color of mapped) {
+      if (color !== remapTo) continue;
+      count++;
+      break; // FIXME
+    }
+    const result = {
+      arch,
+      chunk,
+      data: mapped,
+      plte,
+    };
+    if (count > 0) {
+      const offset = remapTo << 2;
+      result.mask = { code: mask.code, offset, count };
+      if (plte.length <= offset) {
+        result.plte = new Uint8ClampedArray(offset + 4);
+        result.plte.set(plte);
+        result.plte.set(parseRGBA(mask.color), offset);
+      }
+    }
+    if (visible === undefined || count === 0) {
+      result.trans = [plte.buffer, data.buffer];
+    } else {
+      const output = (await services.color).chunk(
+        rect,
+        visible,
+        mapped,
+        result.plte
+      );
+      result.trans = [output, plte.buffer, data.buffer];
+    }
+    return result;
+  },
+
+  exportSkin: async ({ name, skin, width, height }) => {
+    // return { name: `${name}.mppa`, url: URL.createObjectURL(new Blob([skin])) };
+    const service = await services.image;
+    const url = service.dump(skin, width, height, "png");
     return { name: `${name}.png`, url: await url };
   },
-  dumpArchives: async ({ name, data }) => {
+  exportData: async ({ name, data }) => {
     // TODO
   },
 };
@@ -47,30 +87,152 @@ const routers = {
 
 //#region renderer service
 
-class CanvasService {
-  constructor() {
+/**
+ * @typedef {{VERTEX_SHADER: string, FRAGMENT_SHADER: string}} Shaders
+ */
+
+/** WebGL2 Service. */
+class WebGL2Service {
+  /** @type {WebGL2RenderingContext & {canvas: OffscreenCanvas}} */
+  gl;
+  /** @type {WebGLProgram} */
+  program;
+  /** @type {WebGLTexture[]} */
+  textures = [];
+
+  /**
+   * constructor.
+   *
+   * @param {Shaders} shaders .
+   * @param {string[]} textures .
+   */
+  constructor(shaders, textures) {
     const canvas = new OffscreenCanvas(512, 512);
-    this.ctx = canvas.getContext("2d", { willReadFrequently: true });
+    const gl = canvas.getContext("webgl2");
+    if (gl == null) {
+      throw new Error("your browser doesn't support WebGL2.");
+    }
+    const program = gl.createProgram();
+    if (program == null) {
+      throw new Error("create shader program failed.");
+    }
+    this.gl = gl;
+    this.program = program;
+
+    // compile shaders
+    for (const [name, code] of Object.entries(shaders)) {
+      const shader = gl.createShader(gl[name]);
+      gl.shaderSource(shader, code);
+      gl.compileShader(shader);
+      if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+        const message = gl.getShaderInfoLog(shader);
+        throw new Error(`compile shader script failed, message: ${message}`);
+      }
+      gl.attachShader(program, shader);
+    }
+    gl.linkProgram(program);
+    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+      const message = gl.getProgramInfoLog(program);
+      throw new Error(`link shader program failed, message: ${message}`);
+    }
+
+    // #region init vertexArray
+    this._vertexArray = gl.createVertexArray();
+    gl.bindVertexArray(this._vertexArray);
+
+    const indicesBuffer = gl.createBuffer();
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indicesBuffer);
+    const indices = new Uint8ClampedArray([0, 1, 2, 0, 2, 3]);
+    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, indices, gl.STATIC_DRAW);
+
+    const pointsBuffer = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, pointsBuffer);
+    const points = new Int8Array([-1, 1, -1, -1, 1, -1, 1, 1]);
+    gl.bufferData(gl.ARRAY_BUFFER, points, gl.STATIC_DRAW);
+
+    const vertexLoc = 0;
+    gl.vertexAttribPointer(vertexLoc, 2, gl.BYTE, false, 0, 0);
+    gl.enableVertexAttribArray(vertexLoc);
+
+    gl.bindVertexArray(null);
+    //#endregion
+
+    /** @type {(WebGLUniformLocation | null)[]} */ this._texLocations = [];
+    for (let i = 0; i < textures.length; i++) {
+      gl.activeTexture(gl[`TEXTURE${i}`]);
+      const tex = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, tex);
+      this.textures.push(tex);
+      const name = textures[i];
+      const loc = gl.getUniformLocation(program, name);
+      this._texLocations.push(loc);
+
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    }
+  }
+
+  /**
+   * reset.
+   *
+   * @param {number} width .
+   * @param {number} height .
+   */
+  reset(width, height) {
+    // resize view
+    this.gl.canvas.width = width;
+    this.gl.canvas.height = height;
+    this.gl.viewport(0, 0, width, height);
+    // clear canvas
+    this.gl.clearColor(0.0, 0.0, 0.0, 0.0);
+    this.gl.clear(this.gl.COLOR_BUFFER_BIT);
+    this.gl.useProgram(this.program);
+  }
+
+  /**
+   * render.
+   */
+  render() {
+    for (let i = 0; i < this._texLocations.length; i++) {
+      const loc = this._texLocations[i];
+      if (loc != null) this.gl.uniform1i(loc, i);
+    }
+    this.gl.bindVertexArray(this._vertexArray);
+    this.gl.drawElements(this.gl.TRIANGLES, 6, this.gl.UNSIGNED_BYTE, 0);
+    this.gl.bindVertexArray(null);
+  }
+}
+
+class PaintImage extends WebGL2Service {
+  /** @param {Shaders} shaders . */
+  constructor(shaders) {
+    super(shaders, ["bitmap"]);
   }
 
   /**
    * parse image data.
    *
    * @param {ImageBitmap} source .
+   * @param {Uint8ClampedArray} output .
    * @param {Map<number, number>} counter .
    * @param {Map<number, number>} indexer .
-   * @param {Number} align .
    * @returns {Uint8ClampedArray} data
    */
-  parse(source, counter, indexer, align) {
+  parse(source, output, counter, indexer) {
     const { width, height } = source;
-    this.ctx.canvas.width = width;
-    this.ctx.canvas.height = height;
-    this.ctx.drawImage(source, 0, 0);
-    const raw = this.ctx.getImageData(0, 0, width, height);
-    const view = new DataView(raw.data.buffer);
+    this.reset(width, height);
+    const { gl } = this;
+    gl.bindTexture(gl.TEXTURE_2D, this.textures[0]);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
+    // render output
+    this.render();
+    gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, output);
+    const view = new DataView(output.buffer);
 
     let offset = 0;
+    const align = alignWidth(width);
     const data = new Uint8ClampedArray(align * height);
     for (let y = 0; y < height; y++) {
       const j = y * align;
@@ -106,11 +268,25 @@ class CanvasService {
    * @returns {Promise<Blob>}
    */
   async dump(source, width, height, type) {
-    this.ctx.canvas.width = width;
-    this.ctx.canvas.height = height;
-    const data = new ImageData(source, width, height);
-    this.ctx.putImageData(data, 0, 0);
-    const blob = this.ctx.canvas.convertToBlob({
+    this.reset(width, height);
+    const { gl } = this;
+    gl.bindTexture(gl.TEXTURE_2D, this.textures[0]);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+    gl.texImage2D(
+      gl.TEXTURE_2D,
+      0,
+      gl.RGBA,
+      width,
+      height,
+      0,
+      gl.RGBA,
+      gl.UNSIGNED_BYTE,
+      source
+    );
+    // render output
+    this.render();
+
+    const blob = this.gl.canvas.convertToBlob({
       quality: 1,
       type: `image/${type}`,
     });
@@ -118,178 +294,178 @@ class CanvasService {
   }
 }
 
-class WebGL2Service {
-  static GLSL_CODES = {
-    VERTEX_SHADER: `#version 300 es
-precision highp float;
-
-layout (location = 0) in vec2 vertex;
-out vec2 uv;
-
-void main() {
-  uv = vec2(0.5, -0.5) * vertex + vec2(0.5);
-  gl_Position = vec4(vertex, 0.0, 1.0);
-}
-`,
-    FRAGMENT_SHADER: `#version 300 es
-precision highp int;
-precision highp float;
-
-in vec2 uv;
-out vec4 fragColor;
-
-uniform vec4 trans;
-uniform lowp usampler2D dataTex;
-uniform sampler2D plteTex;
-
-void main() {
-  ivec2 pos = ivec2(uv * trans.zw + trans.xy);
-  lowp uint index = texelFetch(dataTex, pos, 0).r;
-  fragColor = texelFetch(plteTex, ivec2(index, 0), 0);
-}
-`,
-  };
-
-  constructor() {
-    const canvas = new OffscreenCanvas(512, 512);
-    const gl = canvas.getContext("webgl2");
-    if (gl == null) {
-      throw new Error("your browser doesn't support WebGL2.");
-    }
-    const program = gl.createProgram();
-    if (program == null) {
-      throw new Error("create shader program failed.");
-    }
-    this.gl = gl;
-    this.program = program;
-
-    // compile shaders
-    for (const [name, code] of Object.entries(WebGL2Service.GLSL_CODES)) {
-      const shader = gl.createShader(gl[name]);
-      gl.shaderSource(shader, code);
-      gl.compileShader(shader);
-      if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
-        const message = gl.getShaderInfoLog(shader);
-        throw new Error(`compile shader script failed, message: ${message}`);
-      }
-      gl.attachShader(program, shader);
-    }
-    gl.linkProgram(program);
-    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
-      const message = gl.getProgramInfoLog(program);
-      throw new Error(`link shader program failed, message: ${message}`);
-    }
-
-    // #region init vertexArray
-    this.vertexArray = gl.createVertexArray();
-    gl.bindVertexArray(this.vertexArray);
-
-    const indicesBuffer = gl.createBuffer();
-    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indicesBuffer);
-    const indices = new Uint16Array([0, 1, 2, 0, 2, 3]);
-    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, indices, gl.STATIC_DRAW);
-
-    const pointsBuffer = gl.createBuffer();
-    gl.bindBuffer(gl.ARRAY_BUFFER, pointsBuffer);
-    const points = new Float32Array([-1, 1, -1, -1, 1, -1, 1, 1]);
-    gl.bufferData(gl.ARRAY_BUFFER, points, gl.STATIC_DRAW);
-
-    const vertexLoc = 0;
-    gl.vertexAttribPointer(vertexLoc, 2, gl.FLOAT, false, 0, 0);
-    gl.enableVertexAttribArray(vertexLoc);
-
-    gl.bindVertexArray(null);
-    //#endregion
-
-    this.transLoc = gl.getUniformLocation(program, "trans");
-    this.dataTexLoc = gl.getUniformLocation(program, "dataTex");
-    this.plteTexLoc = gl.getUniformLocation(program, "plteTex");
-
-    /** @type {WebGLTexture[]} */ this.textures = [];
-    for (let i = 0; i < 2; i++) {
-      gl.activeTexture(gl[`TEXTURE${i}`]);
-      const texture = gl.createTexture();
-      gl.bindTexture(gl.TEXTURE_2D, texture);
-      this.textures.push(texture);
-
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    }
+class IndexColor extends WebGL2Service {
+  /** @param {Shaders} shaders . */
+  constructor(shaders) {
+    super(shaders, ["dataTex", "plteTex"]);
+    this.transLoc = this.gl.getUniformLocation(this.program, "trans");
   }
 
   /**
    * render chunk.
    *
-   * @param {import("./types").Rect} rect .
-   * @param {import("./types").Rect | null} visible .
-   * @param {number} align .
+   * @param {Rect} rect .
+   * @param {Rect | null} visible .
    * @param {ArrayBufferView} data .
    * @param {ArrayBufferView} plte .
    * @returns {ImageBitmap} output
    */
-  chunk([x, y, w, h], visible, align, data, plte) {
-    const { gl, program } = this;
+  chunk([x, y, w, h], visible, data, plte) {
+    const align = alignWidth(w);
     const trans =
       visible == null
         ? [0, 0, w, h]
         : [visible[0] - x, visible[1] - y, visible[2], visible[3]];
-    // const width = w;
-    // const height = h;
-    const width = trans[2];
-    const height = trans[3];
-    // resize view
-    gl.canvas.width = width;
-    gl.canvas.height = height;
-    gl.viewport(0, 0, width, height);
-    // clear canvas
-    gl.clearColor(0.0, 0.0, 0.0, 0.0);
-    gl.clear(gl.COLOR_BUFFER_BIT);
-    gl.useProgram(program);
+    this.reset(trans[2], trans[3]);
+    const { gl } = this;
 
     // texture0: dataTex
     gl.bindTexture(gl.TEXTURE_2D, this.textures[0]);
-    // gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
-    // if ((align & 0b11) !== 0) gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
     gl.texImage2D(
-      /* target */ gl.TEXTURE_2D,
-      /* level */ 0,
-      /* internalformat */ gl.R8UI,
-      /* width */ align,
-      /* height */ h,
-      /* border */ 0,
-      /* format */ gl.RED_INTEGER,
-      /* type */ gl.UNSIGNED_BYTE,
-      /* pixels */ data
+      gl.TEXTURE_2D,
+      0,
+      gl.R8UI,
+      align,
+      h,
+      0,
+      gl.RED_INTEGER,
+      gl.UNSIGNED_BYTE,
+      data
     );
-
     // texture1: plteTex
     gl.bindTexture(gl.TEXTURE_2D, this.textures[1]);
     gl.texImage2D(
-      /* target */ gl.TEXTURE_2D,
-      /* level */ 0,
-      /* internalformat */ gl.RGBA,
-      /* width */ plte.length >> 2,
-      /* height */ 1,
-      /* border */ 0,
-      /* format */ gl.RGBA,
-      /* type */ gl.UNSIGNED_BYTE,
-      /* pixels */ plte
+      gl.TEXTURE_2D,
+      0,
+      gl.RGBA,
+      plte.length >> 2,
+      1,
+      0,
+      gl.RGBA,
+      gl.UNSIGNED_BYTE,
+      plte
     );
 
     // render output
-    gl.bindVertexArray(this.vertexArray);
     gl.uniform4fv(this.transLoc, trans);
-    gl.uniform1i(this.dataTexLoc, 0);
-    gl.uniform1i(this.plteTexLoc, 1);
-    gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);
-    gl.bindVertexArray(null);
+    this.render();
     return gl.canvas.transferToImageBitmap();
   }
 }
 
-const services = { canvas: new CanvasService(), webgl2: new WebGL2Service() };
+class ColorRemap extends WebGL2Service {
+  /** @param {Shaders} shaders . */
+  constructor(shaders) {
+    super(shaders, ["dataTex", "flagTex", "areaTex", "mapper"]);
+    this.transLoc = this.gl.getUniformLocation(this.program, "trans");
+    this.maskColorLoc = this.gl.getUniformLocation(this.program, "maskColor");
+  }
+
+  /**
+   * chunk.
+   *
+   * @param {Rect} rect .
+   * @param {ArrayBufferView} data .
+   * @param {import("./types").Msg["extract"]["req"]["mask"]} mask .
+   * @param {Uint8ClampedArray} mapper .
+   * @returns {Uint8ClampedArray} mapped data
+   */
+  chunk([x, y, w, h], data, mask, mapper) {
+    // const width = alignWidth(w) >> 2;
+    const width = ((w - 1) >> 2) + 1; // UNPACK_ALIGNMENT
+    this.reset(width, h);
+    const { gl } = this;
+
+    // texture0: dataTex
+    gl.bindTexture(gl.TEXTURE_2D, this.textures[0]);
+    gl.texImage2D(
+      gl.TEXTURE_2D,
+      0,
+      gl.RGBA8UI,
+      width,
+      h,
+      0,
+      gl.RGBA_INTEGER,
+      gl.UNSIGNED_BYTE,
+      data
+    );
+
+    // texture1: flagTex
+    gl.bindTexture(gl.TEXTURE_2D, this.textures[1]);
+    gl.texImage2D(
+      gl.TEXTURE_2D,
+      0,
+      gl.R8UI,
+      mask.flag.length,
+      1,
+      0,
+      gl.RED_INTEGER,
+      gl.UNSIGNED_BYTE,
+      mask.flag
+    );
+
+    // texture2: areaTex
+    gl.bindTexture(gl.TEXTURE_2D, this.textures[2]);
+    gl.texImage2D(
+      gl.TEXTURE_2D,
+      0,
+      gl.RGBA32UI,
+      mask.area.length >> 2,
+      1,
+      0,
+      gl.RGBA_INTEGER,
+      gl.UNSIGNED_INT,
+      mask.area
+    );
+
+    // texture3: mapper
+    gl.bindTexture(gl.TEXTURE_2D, this.textures[3]);
+    gl.texImage2D(
+      gl.TEXTURE_2D,
+      0,
+      gl.R8UI,
+      mapper.length,
+      1,
+      0,
+      gl.RED_INTEGER,
+      gl.UNSIGNED_BYTE,
+      mapper
+    );
+
+    // render output
+    gl.uniform4fv(this.transLoc, [x, y, width, h]);
+    this.render();
+    // const mapped = new Uint8ClampedArray(data.length);
+    const mapped = data; // override
+    gl.readPixels(0, 0, width, h, gl.RGBA, gl.UNSIGNED_BYTE, mapped);
+    return mapped;
+  }
+}
+
+//
+
+/**
+ * fetch shaders.
+ *
+ * @param {string} name .
+ * @returns {Promise<Shaders>} .
+ */
+async function fetchShaders(name) {
+  const vert = fetch(new URL(`./shaders/${name}.vert`, import.meta.url)) //
+    .then((resp) => resp.text());
+  const frag = fetch(new URL(`./shaders/${name}.frag`, import.meta.url)) //
+    .then((resp) => resp.text());
+  return {
+    VERTEX_SHADER: await vert,
+    FRAGMENT_SHADER: await frag,
+  };
+}
+
+const services = {
+  image: fetchShaders("PaintImage").then((shaders) => new PaintImage(shaders)),
+  color: fetchShaders("IndexColor").then((shaders) => new IndexColor(shaders)),
+  remap: fetchShaders("ColorRemap").then((shaders) => new ColorRemap(shaders)),
+};
 
 //#endregion
 
