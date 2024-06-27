@@ -35,11 +35,10 @@ uint applyMask(uint rawColor, int size, float x, float y) {
 }
 
 void main() {
-  ivec2 pos = ivec2(uv * trans.zw);
-  uvec4 color = texelFetch(dataTex, pos, 0);
+  uvec4 color = texelFetch(dataTex, ivec2(uv), 0);
 
-  float x = float(pos.x << 2) + trans.x;
-  float y = float(pos.y) + trans.y;
+  float x = float(int(uv.x) << 2) + trans.x;
+  float y = uv.y + trans.y;
   int size = textureSize(areaTex, 0).x;
   fragColor = vec4(
     applyMask(color.r, size, x, y),

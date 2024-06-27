@@ -34,17 +34,6 @@ export interface Archive {
 //
 
 export interface Msg {
-  parseGzip: {
-    req: {
-      url: string;
-      name: string;
-    };
-    resp: {
-      name: string;
-      trans: [buffer: ArrayBuffer];
-    };
-  };
-
   parseImage: {
     req: {
       arch: string;
@@ -56,10 +45,10 @@ export interface Msg {
       chunk: number;
       output: Uint8ClampedArray;
       trans: [
-        count: ArrayBuffer, // [count0,count1,...]
-        output: ArrayBuffer,
-        plte: ArrayBuffer,
-        data: ArrayBuffer
+        count: ArrayBufferLike, // [count0,count1,...]
+        output: ArrayBufferLike,
+        plte: ArrayBufferLike,
+        data: ArrayBufferLike
       ];
     };
   };
@@ -70,12 +59,16 @@ export interface Msg {
       chunk: number;
       rect: Rect;
       visible: Rect | null;
-      trans: [plte: ArrayBuffer, data: ArrayBuffer];
+      trans: [plte: ArrayBufferLike, data: ArrayBufferLike];
     };
     resp: Texture & {
       arch: string;
       chunk: number;
-      trans: [output: ImageBitmap, plte: ArrayBuffer, data: ArrayBuffer];
+      trans: [
+        output: ImageBitmap,
+        plte: ArrayBufferLike,
+        data: ArrayBufferLike
+      ];
     };
   };
 
@@ -86,13 +79,17 @@ export interface Msg {
       rect: Rect;
       visible: Rect | null | undefined;
       mask: {
-        flag: Uint8ClampedArray; // bits of select or cutout
+        flag: Uint8ClampedArray; // bits of select(0) or cutout(1)
         area: Uint32Array; // [left0,top0,right0,bottom0,...]
         code: string;
         color: number;
       };
       mapper: Uint8ClampedArray; // [rawIndex: remapTo]
-      trans: [mapper: ArrayBuffer, plte: ArrayBuffer, data: ArrayBuffer];
+      trans: [
+        mapper: ArrayBufferLike,
+        plte: ArrayBufferLike,
+        data: ArrayBufferLike
+      ];
     };
     resp: Texture & {
       arch: string;
@@ -103,8 +100,8 @@ export interface Msg {
         offset: number;
       };
       trans:
-        | [output: ImageBitmap, plte: ArrayBuffer, data: ArrayBuffer]
-        | [plte: ArrayBuffer, data: ArrayBuffer];
+        | [output: ImageBitmap, plte: ArrayBufferLike, data: ArrayBufferLike]
+        | [plte: ArrayBufferLike, data: ArrayBufferLike];
     };
   };
 
@@ -114,7 +111,7 @@ export interface Msg {
       skin: Uint8ClampedArray;
       width: number;
       height: number;
-      trans: [skin: ArrayBuffer];
+      trans: [skin: ArrayBufferLike];
     };
     resp: {
       name: string;
@@ -124,7 +121,15 @@ export interface Msg {
   exportData: {
     req: {
       name: string;
-      data: Uint8ClampedArray;
+      size: [width: number, height: number];
+      rect: Rect[];
+      data: Uint8ClampedArray[]; // clone
+      mapper: Uint8ClampedArray[]; // trans
+      trans: [...mapper: ArrayBufferLike[]];
+    };
+    resp: {
+      name: string;
+      url: string;
     };
   };
 }

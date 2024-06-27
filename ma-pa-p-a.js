@@ -52,10 +52,6 @@ export class App extends EventTarget {
 
   /** @type {import("./types").MsgHandlers} */
   handlers = {
-    parseGzip: ({ name, buffer }) => {
-      this.log("info", "TODO on parsed gzip", name, buffer);
-    },
-
     parseImage: ({ arch, chunk, output, data, plte, trans: [count] }) => {
       const overColor = this.checkOverColors(plte);
       if (overColor !== false) {
@@ -117,8 +113,9 @@ export class App extends EventTarget {
       dumpFile(name, url);
       setTimeout(() => URL.revokeObjectURL(url), 0);
     },
-    exportData: ({}) => {
-      // TODO
+    exportData: ({ name, url }) => {
+      dumpFile(name, url);
+      setTimeout(() => URL.revokeObjectURL(url), 0);
     },
   };
 
@@ -402,16 +399,20 @@ export class App extends EventTarget {
   /** @param {Palette} palette . */
   extractColor(palette) {
     const code = palette.code;
-    /** @type {{[arch: string]: Map<number, Set<number>>}} */
-    const enableColorsDict = {};
+    /** @type {{[arch: string]: Set<number>[]}} */
+    const enableColorsDict = Object.fromEntries(
+      Object.entries(this.archives).map(([arch, { chunks }]) => [
+        arch,
+        chunks.map(() => new Set()),
+      ])
+    );
     for (const palette of this.iterPalettes(this.sortedPalettes())) {
       if (palette.disable || palette.code === code) continue;
       for (const [arch, refer] of Object.entries(palette.refer)) {
-        const indexes =
-          enableColorsDict[arch] ?? (enableColorsDict[arch] = new Map());
+        const chunks = enableColorsDict[arch];
         for (const { chunk, offset } of refer) {
-          if (!indexes.has(chunk)) indexes.set(chunk, new Set());
-          indexes.get(chunk).add(/* color index */ offset >> 2);
+          const indexes = chunks[chunk];
+          indexes.add(/* color index */ offset >> 2);
         }
       }
     }
@@ -461,7 +462,7 @@ export class App extends EventTarget {
         const mapper = new Uint8ClampedArray(1 + colorNum).fill(255);
         mapper[colorNum] = remapTo;
         if (enableColors != null) {
-          const indexes = enableColors.get(chunk);
+          const indexes = enableColors[chunk];
           if (indexes != null) {
             for (const index of indexes) {
               mapper[index] = remapTo;
@@ -802,6 +803,16 @@ export class App extends EventTarget {
   }
 
   /**
+   * parse image blob.
+   *
+   * @param {string} name .
+   * @param {Blob} blob .
+   */
+  parseGzipBlob(name, blob) {
+    this.log("info", `TODO parse gzip ${name}`, blob);
+  }
+
+  /**
    * parse blob.
    *
    * @param {string} name .
@@ -824,9 +835,8 @@ export class App extends EventTarget {
         this.parseImageBlob(name, blob);
         break;
       }
-      case "mppa": {
-        const url = URL.createObjectURL(blob);
-        this.request("parseGzip", { url, name });
+      case "gz": {
+        this.parseGzipBlob(name.slice(0, index), blob);
         break;
       }
       default: {
@@ -870,11 +880,40 @@ export class App extends EventTarget {
   }
 
   dump() {
-    const palettes = Array.from(this.iterPalettes(this.sortedPalettes()));
-    const origin = palettes.map(({ color }) => parseRGBA(color));
-    let colors = palettes.flatMap(({ layers: [dirty] }, i) =>
-      dirty == null ? origin[i] : parseRGBA(dirty)
+    /** @type {Palette[]} */
+    const palettes = [];
+    /** @type {[r: number, g: number, b: number, a: number][]} */
+    const origin = [];
+    /** @type {number[]} */
+    let colors = [];
+    /** @type {{[arch: string]: Uint8ClampedArray[]}} */
+    const mapperDict = Object.fromEntries(
+      Object.entries(this.archives).map(([arch, { chunks }]) => [
+        arch,
+        chunks.map(
+          ({ texture }) =>
+            new Uint8ClampedArray(
+              texture == null ? 0 : texture.plte.length >> 2
+            )
+        ),
+      ])
     );
+    let index = 0;
+    for (const palette of this.iterPalettes(this.sortedPalettes())) {
+      palettes.push(palette);
+      const rgba = parseRGBA(palette.color);
+      origin.push(rgba);
+      const dirty = palette.layers[0];
+      colors.push(...(dirty == null ? rgba : parseRGBA(dirty)));
+      for (const [arch, refer] of Object.entries(palette.refer)) {
+        const chunks = mapperDict[arch];
+        for (const { chunk, offset } of refer) {
+          const mapper = chunks[chunk];
+          mapper[offset >> 2] = index;
+        }
+      }
+      index++;
+    }
     const rowSize = colors.length;
     for (let j = 1; j <= this.layerNum; j++) {
       let regress = true;
@@ -893,12 +932,12 @@ export class App extends EventTarget {
     const skin = new Uint8ClampedArray(colors);
     const width = palettes.length;
     const height = skin.length / width / 4;
-    const salt = (new Date().getTime() & 0xffffff)
+    const prefix = `[mppa][${(new Date().getTime() & 0xffffff)
       .toString(16)
-      .padStart(6, "0");
+      .padStart(6, "0")}]${" "}`;
     const exportSkin = () => {
       this.request("exportSkin", {
-        name: `mppa-${salt}_${width}x${height}.skin`,
+        name: `${prefix}${width}x${height}`,
         skin,
         width,
         height,
@@ -906,7 +945,22 @@ export class App extends EventTarget {
       });
     };
     const exportData = () => {
-      // TODO
+      for (const { name: arch, size, chunks } of Object.values(this.archives)) {
+        const rect = chunks.map(({ rect }) => rect);
+        const data = chunks.map(({ texture }) => texture.data);
+        const mapper = mapperDict[arch];
+        const trans = mapper.map(({ buffer }) => buffer);
+        const name = arch.slice(0, arch.lastIndexOf("."));
+        this.request("exportData", {
+          name: `${prefix}${name}`,
+          arch,
+          size,
+          rect,
+          data,
+          mapper,
+          trans,
+        });
+      }
     };
     return {
       skin: exportSkin,
@@ -1215,7 +1269,7 @@ class Dialog extends EventTarget {
 
 //#region utils
 
-/** @param {number} color . */
+/** @param {number} color . @returns {[r: number, g: number, b: number, a: number]} . */
 function parseRGBA(color) {
   let value = color >>> 0;
   const a = value & 0xff;
@@ -1313,37 +1367,6 @@ function calcUnitRect(archive, area) {
 }
 
 /**
- * keep rect ratio.
- *
- * @param {Rect} rect .
- * @returns {Rect} .
- */
-function fixRatioRect(rect) {
-  let [x, y, w, h] = rect;
-  if (w < h) {
-    const min = 1 - h;
-    if (min < x) {
-      x = min;
-    } else {
-      x += (w - h) / 2;
-      if (x < 0) x = 0;
-    }
-    return [x, y, h, h];
-  } else if (w > h) {
-    const min = 1 - w;
-    if (min < y) {
-      y = min;
-    } else {
-      y += (h - w) / 2;
-      if (y < 0) y = 0;
-    }
-    return [x, y, w, w];
-  } else {
-    return rect;
-  }
-}
-
-/**
  * transform rect.
  *
  * @param {Rect} rect .
@@ -1357,20 +1380,6 @@ function transformRect([x, y, w, h], [moveX, moveY, scaleW, scaleH]) {
     Math.round(w * scaleW),
     Math.round(h * scaleH),
   ];
-}
-
-/** @param {Archive} archive . @param {Rect} rect . @param {number} chunk . */
-function readyVisibleRect({ ctx, zoom }, rect, chunk) {
-  if (zoom == null) {
-    ctx.clearRect(...rect);
-    return null;
-  }
-  const visible = zoom.visible.get(chunk);
-  if (visible == null) return;
-  const dx = visible[0] - zoom.area[0];
-  const dy = visible[1] - zoom.area[1];
-  ctx.clearRect(dx, dy, visible[2], visible[3]);
-  return visible;
 }
 
 /**
@@ -1433,12 +1442,17 @@ function* chunkRects(width, height, chunkSize) {
     yield [0, 0, width, height];
     return;
   }
-  const h = Math.ceil(height / num);
+  const h = quatAlign(Math.ceil(height / num));
   let y = 0;
   for (; y < height - h; y += h) {
     yield [0, y, width, h];
   }
   if (y < height) yield [0, y, width, height - y];
+}
+
+/** @param {number} value . */
+function quatAlign(value) {
+  return (((value - 1) >> 2) + 1) << 2; // UNPACK_ALIGNMENT
 }
 
 /**

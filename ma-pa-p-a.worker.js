@@ -4,13 +4,6 @@
 
 /** @type {import("./types").MsgRouters} */
 const routers = {
-  parseGzip: async ({ url, name }) => {
-    const blob = await fetch(url).then((resp) => resp.blob());
-    URL.revokeObjectURL(url);
-    const buffer = await decompress(blob.stream()).arrayBuffer();
-    return { name, trans: [buffer] };
-  },
-
   parseImage: async ({ arch, chunk, trans: [source] }) => {
     const service = await services.image;
     const output = new Uint8ClampedArray((source.width * source.height) << 2);
@@ -35,7 +28,9 @@ const routers = {
   },
 
   extract: async ({ arch, chunk, rect, visible, data, plte, mask, mapper }) => {
-    const mapped = (await services.remap).chunk(rect, data, mask, mapper);
+    const service = await services.remap;
+    const mapped = service.chunk(rect, data, mask, mapper);
+
     const remapTo = mapper[mapper.length - 1];
     let count = 0;
     for (const color of mapped) {
@@ -73,13 +68,17 @@ const routers = {
   },
 
   exportSkin: async ({ name, skin, width, height }) => {
-    // return { name: `${name}.mppa`, url: URL.createObjectURL(new Blob([skin])) };
     const service = await services.image;
-    const url = service.dump(skin, width, height, "png");
-    return { name: `${name}.png`, url: await url };
+    const blob = service.dump(skin, width, height, "png");
+    const url = URL.createObjectURL(await blob);
+    return { name: `${name}.skin.png`, url };
   },
-  exportData: async ({ name, data }) => {
-    // TODO
+  exportData: async ({ name, size, rect, data, mapper }) => {
+    const service = await services.remap;
+    const blob = service.dump(size, rect, data, mapper, "webp");
+    const resp = compress((await blob).stream(), "gzip");
+    const url = URL.createObjectURL(await resp.blob());
+    return { name: `${name}.webp.gz`, url };
   },
 };
 
@@ -232,7 +231,7 @@ class PaintImage extends WebGL2Service {
     const view = new DataView(output.buffer);
 
     let offset = 0;
-    const align = alignWidth(width);
+    const align = quatAlign(width);
     const data = new Uint8ClampedArray(align * height);
     for (let y = 0; y < height; y++) {
       const j = y * align;
@@ -259,13 +258,13 @@ class PaintImage extends WebGL2Service {
   }
 
   /**
-   * dump to iamge blob.
+   * dump to image blob.
    *
    * @param {Uint8ClampedArray} source .
    * @param {number} width .
    * @param {number} height .
    * @param {"png" | "webp"} type .
-   * @returns {Promise<Blob>}
+   * @returns {Promise<Blob>} blob
    */
   async dump(source, width, height, type) {
     this.reset(width, height);
@@ -285,12 +284,10 @@ class PaintImage extends WebGL2Service {
     );
     // render output
     this.render();
-
-    const blob = this.gl.canvas.convertToBlob({
+    return this.gl.canvas.convertToBlob({
       quality: 1,
       type: `image/${type}`,
     });
-    return URL.createObjectURL(await blob);
   }
 }
 
@@ -311,7 +308,7 @@ class IndexColor extends WebGL2Service {
    * @returns {ImageBitmap} output
    */
   chunk([x, y, w, h], visible, data, plte) {
-    const align = alignWidth(w);
+    const align = quatAlign(w);
     const trans =
       visible == null
         ? [0, 0, w, h]
@@ -362,18 +359,16 @@ class ColorRemap extends WebGL2Service {
   }
 
   /**
-   * chunk.
+   * render.
    *
    * @param {Rect} rect .
    * @param {ArrayBufferView} data .
-   * @param {import("./types").Msg["extract"]["req"]["mask"]} mask .
+   * @param {Pick<import("./types").Msg["extract"]["req"]["mask"], "flag" | "area">} mask .
    * @param {Uint8ClampedArray} mapper .
-   * @returns {Uint8ClampedArray} mapped data
    */
-  chunk([x, y, w, h], data, mask, mapper) {
-    // const width = alignWidth(w) >> 2;
+  render([x, y, w, h], data, mask, mapper) {
+    // const width = quatAlign(w) >> 2;
     const width = ((w - 1) >> 2) + 1; // UNPACK_ALIGNMENT
-    this.reset(width, h);
     const { gl } = this;
 
     // texture0: dataTex
@@ -434,11 +429,59 @@ class ColorRemap extends WebGL2Service {
 
     // render output
     gl.uniform4fv(this.transLoc, [x, y, width, h]);
-    this.render();
+    super.render();
+  }
+
+  /**
+   * render.
+   *
+   * @param {Rect} rect .
+   * @param {ArrayBufferView} data .
+   * @param {Pick<import("./types").Msg["extract"]["req"]["mask"], "flag" | "area">} mask .
+   * @param {Uint8ClampedArray} mapper .
+   * @returns {Uint8ClampedArray} mapped data
+   */
+  chunk(rect, data, mask, mapper) {
+    // const width = quatAlign(rect[2]) >> 2;
+    const width = ((rect[2] - 1) >> 2) + 1; // UNPACK_ALIGNMENT
+    const height = rect[3];
+    this.reset(width, height);
+
+    this.render(rect, data, mask, mapper);
     // const mapped = new Uint8ClampedArray(data.length);
     const mapped = data; // override
-    gl.readPixels(0, 0, width, h, gl.RGBA, gl.UNSIGNED_BYTE, mapped);
+    const { gl } = this;
+    gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, data);
     return mapped;
+  }
+
+  /**
+   * dump to image blob.
+   *
+   * @param {[width: number, height: number]} size .
+   * @param {Rect[]} rect .
+   * @param {ArrayBufferView[]} data .
+   * @param {Uint8ClampedArray[]} mapper .
+   * @param {"png" | "webp"} type .
+   * @returns {Promise<Blob>} blob
+   */
+  async dump(size, rect, data, mapper, type) {
+    // const width = quatAlign(size[0]) >> 2;
+    const width = ((size[0] - 1) >> 2) + 1; // UNPACK_ALIGNMENT
+    const height = size[1];
+    this.reset(width, height);
+
+    const flag = new Uint8ClampedArray([0]);
+    for (let i = 0; i < rect.length; i++) {
+      const [x, y, w, h] = rect[i];
+      this.gl.viewport(x >> 2, y, ((w - 1) >> 2) + 1, h);
+      const area = new Uint32Array([x, y, x + w, y + h]);
+      this.render(rect[i], data[i], { flag, area }, mapper[i]);
+    }
+    return this.gl.canvas.convertToBlob({
+      quality: 1,
+      type: `image/${type}`,
+    });
   }
 }
 
@@ -486,9 +529,9 @@ function parseRGBA(color) {
   return [r, g, b, a];
 }
 
-/** @param {number} width . */
-function alignWidth(width) {
-  return (((width - 1) >> 2) + 1) << 2; // UNPACK_ALIGNMENT
+/** @param {number} value . */
+function quatAlign(value) {
+  return (((value - 1) >> 2) + 1) << 2; // UNPACK_ALIGNMENT
 }
 
 /**
