@@ -78,7 +78,17 @@ const routers = {
     const blob = service.dump(size, rect, data, mapper, "webp");
     const resp = compress((await blob).stream(), "gzip");
     const url = URL.createObjectURL(await resp.blob());
-    return { name: `${name}.webp.gz`, url };
+    return { name: `${name}.data.gz`, url };
+  },
+
+  importSkin: async () => {
+    // TODO
+  },
+  importData: async ({ arch, plte, trans: [source] }) => {
+    const data = (await services.image).load(source);
+    const rect = [0, 0, source.width << 2, source.height];
+    const output = (await services.color).chunk(rect, null, data, plte);
+    return { arch, data, plte, trans: [output, plte.buffer, data.buffer] };
   },
 };
 
@@ -266,7 +276,7 @@ class PaintImage extends WebGL2Service {
    * @param {"png" | "webp"} type .
    * @returns {Promise<Blob>} blob
    */
-  async dump(source, width, height, type) {
+  dump(source, width, height, type) {
     this.reset(width, height);
     const { gl } = this;
     gl.bindTexture(gl.TEXTURE_2D, this.textures[0]);
@@ -288,6 +298,25 @@ class PaintImage extends WebGL2Service {
       quality: 1,
       type: `image/${type}`,
     });
+  }
+
+  /**
+   * load image data from blob.
+   *
+   * @param {ImageBitmap} source .
+   * @returns {Uint8ClampedArray} loaded data
+   */
+  load(source) {
+    const { width, height } = source;
+    this.reset(width, height);
+    const { gl } = this;
+    gl.bindTexture(gl.TEXTURE_2D, this.textures[0]);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
+    // render output
+    this.render();
+    const data = new Uint8ClampedArray((width * height) << 2);
+    gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, data);
+    return data;
   }
 }
 
@@ -365,14 +394,16 @@ class ColorRemap extends WebGL2Service {
    * @param {ArrayBufferView} data .
    * @param {Pick<import("./types").Msg["extract"]["req"]["mask"], "flag" | "area">} mask .
    * @param {Uint8ClampedArray} mapper .
+   * @param {boolean} [flipY=false] .
    */
-  render([x, y, w, h], data, mask, mapper) {
+  render([x, y, w, h], data, mask, mapper, flipY = false) {
     // const width = quatAlign(w) >> 2;
     const width = ((w - 1) >> 2) + 1; // UNPACK_ALIGNMENT
     const { gl } = this;
 
     // texture0: dataTex
     gl.bindTexture(gl.TEXTURE_2D, this.textures[0]);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, flipY);
     gl.texImage2D(
       gl.TEXTURE_2D,
       0,
@@ -465,7 +496,7 @@ class ColorRemap extends WebGL2Service {
    * @param {"png" | "webp"} type .
    * @returns {Promise<Blob>} blob
    */
-  async dump(size, rect, data, mapper, type) {
+  dump(size, rect, data, mapper, type) {
     // const width = quatAlign(size[0]) >> 2;
     const width = ((size[0] - 1) >> 2) + 1; // UNPACK_ALIGNMENT
     const height = size[1];
@@ -474,9 +505,9 @@ class ColorRemap extends WebGL2Service {
     const flag = new Uint8ClampedArray([0]);
     for (let i = 0; i < rect.length; i++) {
       const [x, y, w, h] = rect[i];
-      this.gl.viewport(x >> 2, y, ((w - 1) >> 2) + 1, h);
+      this.gl.viewport(x >> 2, height - y - h, ((w - 1) >> 2) + 1, h);
       const area = new Uint32Array([x, y, x + w, y + h]);
-      this.render(rect[i], data[i], { flag, area }, mapper[i]);
+      this.render(rect[i], data[i], { flag, area }, mapper[i], true);
     }
     return this.gl.canvas.convertToBlob({
       quality: 1,
@@ -544,18 +575,6 @@ function quatAlign(value) {
 function compress(stream, format = "gzip") {
   const compression = new CompressionStream(format);
   return new Response(stream.pipeThrough(compression));
-}
-
-/**
- * decompress.
- *
- * @param {ReadableStream<Uint8Array>} stream .
- * @param {CompressionFormat} format .
- * @returns {Response} .
- */
-function decompress(stream, format = "gzip") {
-  const decompression = new DecompressionStream(format);
-  return new Response(stream.pipeThrough(decompression));
 }
 
 self.addEventListener(

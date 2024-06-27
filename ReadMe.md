@@ -10,6 +10,8 @@
 - [With example image](https://zhengxiaoyao0716.github.io/ma-pa-p-a/?fetch=https://raw.githubusercontent.com/zhengxiaoyao0716/ma-pa-p-a/main/.docs/example.png)
   > Thanks for [Analog studios](https://itch.io/c/1507436/fantasy-)
 
+- [With example dumps](https://zhengxiaoyao0716.github.io/ma-pa-p-a/?fetch=https://raw.githubusercontent.com/zhengxiaoyao0716/ma-pa-p-a/main/.docs/[mppa]%20[1ba1e0]%2024x1.skin.png&fetch=https://raw.githubusercontent.com/zhengxiaoyao0716/ma-pa-p-a/main/.docs/[mppa]%20[1ba1e0]%20example.data.gz)
+
 ## Usage
 
 Usage 1. Traditional (style+html+script)

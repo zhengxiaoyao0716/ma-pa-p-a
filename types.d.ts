@@ -132,6 +132,26 @@ export interface Msg {
       url: string;
     };
   };
+
+  importSkin: {
+    req: {};
+    resp: {};
+  };
+  importData: {
+    req: {
+      arch: string;
+      plte: Uint8ClampedArray;
+      trans: [source: ImageBitmap, plte: ArrayBufferLike];
+    };
+    resp: Texture & {
+      arch: string;
+      trans: [
+        output: ImageBitmap,
+        plte: ArrayBufferLike,
+        data: ArrayBufferLike
+      ];
+    };
+  };
 }
 
 export type MsgType = keyof Msg;

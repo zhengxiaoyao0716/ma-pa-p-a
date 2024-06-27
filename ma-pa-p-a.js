@@ -117,6 +117,20 @@ export class App extends EventTarget {
       dumpFile(name, url);
       setTimeout(() => URL.revokeObjectURL(url), 0);
     },
+
+    importSkin: () => {
+      // TODO
+    },
+    importData: ({ arch, data, plte, trans: [output] }) => {
+      const { ctx, chunks } = this.archives[arch];
+      const rect = [0, 0, output.width, output.height];
+      chunks.push({ rect, texture: { data, plte } });
+      // TODO
+      const detail = this.iterPalettes(this.sortedPalettes());
+      this.dispatchEvent(new CustomEvent("updatePalette", { detail }));
+      ctx.drawImage(output, 0, 0);
+      output.close();
+    },
   };
 
   //#endregion
@@ -743,18 +757,18 @@ export class App extends EventTarget {
 
   //#endregion
 
-  /**
-   * parse image blob.
-   *
-   * @param {string} name .
-   * @param {Blob} blob .
-   */
-  parseImageBlob(name, blob) {
+  static REGEX = ((base) => ({
+    skin: new RegExp(`${base.source}\\d+x\\d+\\.skin\\.png$`),
+    data: new RegExp(`${base.source}.*\\.data$`),
+    base,
+  }))(/^\[mppa\]\s*\[[\da-f]+\]\s*/);
+
+  /** @param {string} name . */
+  createArchive(name) {
     if (name in this.archives) {
       this.log("warn", `duplicated image, name: ${name}`);
       return;
     }
-    const bitmap = window.createImageBitmap(blob);
 
     const canvas = document.createElement("canvas");
     canvas.title = `${name} 0x0`;
@@ -770,22 +784,46 @@ export class App extends EventTarget {
     this.archiveNum++;
     this.archives[name] = archive;
     this.dispatchEvent(new CustomEvent("createImage", { detail: archive }));
+    return archive;
+  }
 
-    bitmap.then((bitmap) => {
-      archive.size[0] = bitmap.width;
-      archive.size[1] = bitmap.height;
-      const { canvas } = archive.ctx;
-      canvas.width = bitmap.width;
-      canvas.height = bitmap.height;
-      canvas.title = `${name} ${archive.size.join("x")}`;
-      canvas.classList.remove("loading");
+  /**
+   * parse image blob.
+   *
+   * @param {string} name .
+   * @param {Blob} blob .
+   */
+  async parseImageBlob(name, blob) {
+    if (name.match(App.REGEX.skin)) {
+      // TODO
+      // return;
+    }
+    const archive = this.createArchive(name);
+    if (archive == null) return;
 
-      const arch = archive.name;
-      for (const rect of chunkRects(
-        bitmap.width,
-        bitmap.height,
-        this.chunkSize
-      )) {
+    const bitmap = await loadImageBitmap(blob);
+    archive.size[0] = bitmap.width;
+    archive.size[1] = bitmap.height;
+    const arch = archive.name;
+    if (arch.match(App.REGEX.data)) {
+      archive.size[0] <<= 2; // rgba => 0,1,2,3
+      const colors = Array.from(
+        this.iterPalettes(this.sortedPalettes()),
+        ({ color, layers }) => layers[this.layer] ?? color
+      ).flatMap(parseRGBA);
+      // TODO
+      const plte = new Uint8ClampedArray(
+        colors.length > 0
+          ? colors
+          : Array.from({ length: 256 }).flatMap((_, i) => [i, i, i, 255])
+      );
+      this.request("importData", {
+        arch,
+        plte,
+        trans: [bitmap, plte.buffer],
+      });
+    } else {
+      for (const rect of chunkRects(archive.size, this.chunkSize)) {
         const source = window.createImageBitmap(bitmap, ...rect);
         const id = archive.chunks.length;
         archive.chunks.push({ rect });
@@ -798,18 +836,12 @@ export class App extends EventTarget {
           source.close();
         });
       }
-      bitmap.close();
-    });
-  }
-
-  /**
-   * parse image blob.
-   *
-   * @param {string} name .
-   * @param {Blob} blob .
-   */
-  parseGzipBlob(name, blob) {
-    this.log("info", `TODO parse gzip ${name}`, blob);
+    }
+    const { canvas } = archive.ctx;
+    canvas.width = archive.size[0];
+    canvas.height = archive.size[1];
+    canvas.title = `${arch} ${archive.size.join("x")}`;
+    canvas.classList.remove("loading");
   }
 
   /**
@@ -836,7 +868,7 @@ export class App extends EventTarget {
         break;
       }
       case "gz": {
-        this.parseGzipBlob(name.slice(0, index), blob);
+        this.parseImageBlob(name.slice(0, index), blob);
         break;
       }
       default: {
@@ -932,7 +964,7 @@ export class App extends EventTarget {
     const skin = new Uint8ClampedArray(colors);
     const width = palettes.length;
     const height = skin.length / width / 4;
-    const prefix = `[mppa][${(new Date().getTime() & 0xffffff)
+    const prefix = `[mppa] [${(new Date().getTime() & 0xffffff)
       .toString(16)
       .padStart(6, "0")}]${" "}`;
     const exportSkin = () => {
@@ -950,7 +982,9 @@ export class App extends EventTarget {
         const data = chunks.map(({ texture }) => texture.data);
         const mapper = mapperDict[arch];
         const trans = mapper.map(({ buffer }) => buffer);
-        const name = arch.slice(0, arch.lastIndexOf("."));
+        const name = arch
+          .slice(0, arch.lastIndexOf("."))
+          .replace(App.REGEX.base, "");
         this.request("exportData", {
           name: `${prefix}${name}`,
           arch,
@@ -1406,6 +1440,50 @@ function drawImage(ctx, output, index, [x, y, w, h], zoom) {
   ctx.drawImage(output, dx, dy, dw, dh);
 }
 
+/** @param {Blob} blob . @param {boolean} [gzip] . */
+async function loadImageBitmap(blob, gzip) {
+  if (gzip == null) {
+    // application/x-gzip, application/gzip, application/octet-stream
+    const guess = blob.type.startsWith("application/");
+    try {
+      return loadImageBitmap(blob, guess);
+    } catch {
+      console.warn(`guess image blob type failed, type: ${blob.type}`);
+      return loadImageBitmap(blob, !guess);
+    }
+  }
+  // else
+  if (gzip) {
+    const resp = decompress(blob.stream(), "gzip");
+    return loadImageBitmap(await resp.blob(), false);
+  } else {
+    return await window.createImageBitmap(blob);
+  }
+}
+
+/**
+ * decompress.
+ *
+ * @param {ReadableStream<Uint8Array>} stream .
+ * @param {CompressionFormat} format .
+ * @returns {Response} .
+ */
+function decompress(stream, format = "gzip") {
+  const decompression = new DecompressionStream(format);
+  return new Response(stream.pipeThrough(decompression));
+}
+
+const packageInfo = (() => {
+  /** @type {Promise<import("./package.json")> | null} */
+  let json;
+  /** @returns {Promise<import("./package.json")>} */
+  return () => {
+    if (json != null) return json;
+    const url = new URL("./package.json", import.meta.url);
+    return (json = fetch(url).then((resp) => resp.json()));
+  };
+})();
+
 //#endregion
 
 /**
@@ -1424,14 +1502,13 @@ function dumpFile(name, url) {
 /**
  * iter chunks.
  *
- * @param {number} width .
- * @param {number} height .
+ * @param {[width: number, height: number]} imageSize .
  * @param {number} chunkSize .
  * @returns {Iterable<Rect>} chunk rects
  */
-function* chunkRects(width, height, chunkSize) {
+function* chunkRects([width, height], chunkSize) {
   if (width > height) {
-    const chunks = chunkRects(height, width, chunkSize);
+    const chunks = chunkRects([height, width], chunkSize);
     for (const [y, x, h, w] of chunks) {
       yield [x, y, w, h];
     }
@@ -1513,8 +1590,9 @@ function fetchAndParse(app, query) {
       if (!resp.ok) return;
       const blob = resp.blob();
       const index = resp.url.lastIndexOf("/");
-      const name = resp.url.slice(1 + index);
-      app.parseBlob(name, await blob);
+      const end = resp.url.length;
+      const name = resp.url.slice(1 + index, end);
+      app.parseBlob(window.decodeURIComponent(name), await blob);
     });
   }
 }
@@ -1899,8 +1977,9 @@ function createTitlebar(app) {
       ctrl: "Export all",
       skin: "- Export skin",
       data: "- Export data",
-      sort: app.sortBy === "count" ? "Sort by rainbow" : "Sort by pixel count",
+      // sort: app.sortBy === "count" ? "Sort by rainbow" : "Sort by pixel count",
       clear: "Clear all",
+      home: "GitHub",
     });
 
     const switchLayer = (layer) => {
@@ -1926,6 +2005,16 @@ function createTitlebar(app) {
         app.dialog.hide();
         switchLayer(layer);
       });
+      const $home = $dialog.querySelector("#home");
+      packageInfo().then(({ name, homepage, version }) => {
+        $home.title = name;
+        $home.href = homepage;
+        const badge = `https://img.shields.io/badge/MA--PA--P--A-${version}-blue`;
+        const style = "?style=for-the-badge&logo=github";
+        $home.innerHTML = `<span><img alt="Static Badge" src="${badge}${style}"></span>`;
+      });
+      $home.target = "_blank";
+      $home.classList.add("hr-top");
     };
     return {
       html,
@@ -2308,10 +2397,9 @@ function createArchives(app) {
  * create messages.
  *
  * @param {App} app .
- * @param {boolean} silent .
  * @returns messages box
  */
-function createMessages(app, silent) {
+function createMessages(app) {
   const $box = document.createElement("div");
   $box.id = "messages";
 
@@ -2335,18 +2423,6 @@ function createMessages(app, silent) {
     /** @param {CustomEvent<{level: LogLevel, message: string}>} */
     ({ detail: { level, message } }) => showMessage(level, message)
   );
-  if (!silent) {
-    fetch(new URL("./package.json", import.meta.url))
-      .then((resp) => resp.json())
-      .then(({ name, version, author, license, homepage }) => {
-        const message = [
-          `| ${name} v${version} ${author} |`,
-          `|_ ${license} ${homepage} _|`,
-        ].join("\n");
-        console.info(message);
-        showMessage("info", message, 1000);
-      });
-  }
   return $box;
 }
 
@@ -2398,17 +2474,26 @@ async function fetchStyle(url) {
  * @param {App} app .
  * @param {HTMLElement | string} root root element or it's selector
  * @param {string} [query="parse"] uri query keyword for auto upload and parse file
- * @param {boolean} [silent=false] do not show package information.
+ * @param {boolean} [silent=false] do not output package information.
  */
 export function render(app, root = ".mppa", query = "fetch", silent = false) {
   const $root =
     root instanceof HTMLElement ? root : document.querySelector(root);
   $root.appendChild(createTitlebar(app));
   $root.appendChild(createArchives(app));
-  $root.appendChild(createMessages(app, silent));
+  $root.appendChild(createMessages(app));
   $root.append(Dialog.modal(app.dialog));
   listenUpload(app, $root);
   if (query) fetchAndParse(app, query);
+  if (!silent) {
+    packageInfo().then(({ name, version, author, license, homepage }) => {
+      const message = [
+        `| ${name} v${version} ${author} |`,
+        `|_ ${license} ${homepage} _|`,
+      ].join("\n");
+      console.info(message);
+    });
+  }
 }
 
 //

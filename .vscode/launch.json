@@ -16,7 +16,8 @@
         "--host",
         "0.0.0.0",
         "--open",
-        "http://localhost:5173/?fetch=.docs/example.png"
+        // "http://localhost:5173/?fetch=.docs/example.png"
+        "http://localhost:5173/?fetch=.docs/[mppa]%20[1ba1e0]%2024x1.skin.png&fetch=.docs/[mppa]%20[1ba1e0]%20example.data.gz"
       ]
     }
   ]

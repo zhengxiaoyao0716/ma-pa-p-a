@@ -477,6 +477,9 @@
   & > *.hr {
     border-bottom: 1px solid var(--frame);
   }
+  & > *.hr-top {
+    border-top: 1px solid var(--frame);
+  }
   & > * > small {
     /* position: absolute;
     right: 1em; */
