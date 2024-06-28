@@ -81,12 +81,22 @@ const routers = {
     return { name: `${name}.data.gz`, url };
   },
 
-  importSkin: async () => {
-    // TODO
+  importSkin: async ({ trans: [source] }) => {
+    const service = await services.image;
+    const output = service.load(source, source.width, source.height);
+    return { width: source.width << 2, trans: [output.buffer] };
   },
   importData: async ({ arch, plte, trans: [source] }) => {
-    const data = (await services.image).load(source);
-    const rect = [0, 0, source.width << 2, source.height];
+    const service = await services.image;
+    const loaded = service.load(source, source.width, source.height);
+    const data = new Uint8ClampedArray(source.width * source.height);
+    for (let i = 0; i < data.length; i++) {
+      data[i] = loaded[i << 2];
+    }
+    if (plte.length === 0) {
+      return { arch, data, plte, trans: [plte.buffer, data.buffer] };
+    }
+    const rect = [0, 0, source.width, source.height];
     const output = (await services.color).chunk(rect, null, data, plte);
     return { arch, data, plte, trans: [output, plte.buffer, data.buffer] };
   },
@@ -304,10 +314,11 @@ class PaintImage extends WebGL2Service {
    * load image data from blob.
    *
    * @param {ImageBitmap} source .
+   * @param {number} width .
+   * @param {number} height .
    * @returns {Uint8ClampedArray} loaded data
    */
-  load(source) {
-    const { width, height } = source;
+  load(source, width, height) {
     this.reset(width, height);
     const { gl } = this;
     gl.bindTexture(gl.TEXTURE_2D, this.textures[0]);
@@ -384,21 +395,22 @@ class ColorRemap extends WebGL2Service {
   constructor(shaders) {
     super(shaders, ["dataTex", "flagTex", "areaTex", "mapper"]);
     this.transLoc = this.gl.getUniformLocation(this.program, "trans");
+    this.stackLoc = this.gl.getUniformLocation(this.program, "stack");
     this.maskColorLoc = this.gl.getUniformLocation(this.program, "maskColor");
   }
 
   /**
-   * render.
+   * config parameters.
    *
    * @param {Rect} rect .
    * @param {ArrayBufferView} data .
    * @param {Pick<import("./types").Msg["extract"]["req"]["mask"], "flag" | "area">} mask .
    * @param {Uint8ClampedArray} mapper .
    * @param {boolean} [flipY=false] .
+   * @param {boolean} [stack=false] .
    */
-  render([x, y, w, h], data, mask, mapper, flipY = false) {
-    // const width = quatAlign(w) >> 2;
-    const width = ((w - 1) >> 2) + 1; // UNPACK_ALIGNMENT
+  config([x, y, w, h], data, mask, mapper, flipY, stack) {
+    const align = quatAlign(w);
     const { gl } = this;
 
     // texture0: dataTex
@@ -407,11 +419,11 @@ class ColorRemap extends WebGL2Service {
     gl.texImage2D(
       gl.TEXTURE_2D,
       0,
-      gl.RGBA8UI,
-      width,
+      gl.R8UI,
+      align,
       h,
       0,
-      gl.RGBA_INTEGER,
+      gl.RED_INTEGER,
       gl.UNSIGNED_BYTE,
       data
     );
@@ -459,8 +471,8 @@ class ColorRemap extends WebGL2Service {
     );
 
     // render output
-    gl.uniform4fv(this.transLoc, [x, y, width, h]);
-    super.render();
+    gl.uniform4fv(this.transLoc, [x, y, align, h]);
+    gl.uniform1i(this.stackLoc, stack);
   }
 
   /**
@@ -478,11 +490,12 @@ class ColorRemap extends WebGL2Service {
     const height = rect[3];
     this.reset(width, height);
 
-    this.render(rect, data, mask, mapper);
+    this.config(rect, data, mask, mapper, false, true);
+    this.render();
     // const mapped = new Uint8ClampedArray(data.length);
     const mapped = data; // override
     const { gl } = this;
-    gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, data);
+    gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, mapped);
     return mapped;
   }
 
@@ -496,18 +509,16 @@ class ColorRemap extends WebGL2Service {
    * @param {"png" | "webp"} type .
    * @returns {Promise<Blob>} blob
    */
-  dump(size, rect, data, mapper, type) {
-    // const width = quatAlign(size[0]) >> 2;
-    const width = ((size[0] - 1) >> 2) + 1; // UNPACK_ALIGNMENT
-    const height = size[1];
+  dump([width, height], rect, data, mapper, type) {
     this.reset(width, height);
 
     const flag = new Uint8ClampedArray([0]);
     for (let i = 0; i < rect.length; i++) {
       const [x, y, w, h] = rect[i];
-      this.gl.viewport(x >> 2, height - y - h, ((w - 1) >> 2) + 1, h);
+      this.gl.viewport(x, height - y - h, w, h);
       const area = new Uint32Array([x, y, x + w, y + h]);
-      this.render(rect[i], data[i], { flag, area }, mapper[i], true);
+      this.config(rect[i], data[i], { flag, area }, mapper[i], true, false);
+      this.render();
     }
     return this.gl.canvas.convertToBlob({
       quality: 1,
@@ -558,6 +569,20 @@ function parseRGBA(color) {
   value >>>= 8;
   const r = value & 0xff;
   return [r, g, b, a];
+}
+
+/** @param {Uint8ClampedArray} data . */
+function createTempPlte(data) {
+  let max = 0;
+  for (const color of data) {
+    if (color > 255) break;
+    if (color > max) max = color;
+  }
+  const colors = Array.from({ length: 1 + max }).flatMap((_, i) => {
+    const v = Math.round((i / max) * 255);
+    return [v, v, v, 255];
+  });
+  return new Uint8ClampedArray(colors);
 }
 
 /** @param {number} value . */

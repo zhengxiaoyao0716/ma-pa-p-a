@@ -6,6 +6,7 @@ in vec2 uv;
 out vec4 fragColor;
 
 uniform vec4 trans;
+uniform bool stack;
 uniform lowp usampler2D dataTex;
 uniform lowp usampler2D flagTex;
 uniform highp usampler2D areaTex;
@@ -19,31 +20,30 @@ bool hasPoint(vec4 area, float x, float y) {
   return 4.0 <= has; // false if has < 4.0 else true
 }
 
-uint applyMask(uint rawColor, int size, float x, float y) {
-  uint mapped = texelFetch(mapper, ivec2(rawColor, 0), 0).r;
-  if (mapped == 255u) return rawColor;
+lowp uint applyMask(int size, float offset) {
+  vec2 pos = vec2(uv.x + offset, uv.y);
+  lowp uint source = texelFetch(dataTex, ivec2(pos), 0).r;
+  lowp uint mapped = texelFetch(mapper, ivec2(source, 0), 0).r;
+  if (mapped == 255u) return source;
 
+  vec2 point = pos + trans.xy;
   for (int i = size - 1; i >= 0; i--) {
     uvec4 area = texelFetch(areaTex, ivec2(i, 0), 0);
-    if (hasPoint(vec4(area), x, y)) {
+    if (hasPoint(vec4(area), point.x, point.y)) {
       uint flag = texelFetch(flagTex, ivec2(i >> 3, 0), 0).r;
       bool cutout = (flag & uint(1 << (i & 7))) != 0u;
-      return cutout ? rawColor : mapped;
+      return cutout ? source : mapped;
     }
   }
-  return rawColor;
+  return source;
 }
 
 void main() {
-  uvec4 color = texelFetch(dataTex, ivec2(uv), 0);
-
-  float x = float(int(uv.x) << 2) + trans.x;
-  float y = uv.y + trans.y;
   int size = textureSize(areaTex, 0).x;
-  fragColor = vec4(
-    applyMask(color.r, size, x, y),
-    applyMask(color.g, size, x + 1.0, y),
-    applyMask(color.b, size, x + 2.0, y),
-    applyMask(color.a, size, x + 3.0, y)
-  ) / 255.0;
+  fragColor = stack ? vec4(
+    applyMask(size, 0.0),
+    applyMask(size, 1.0),
+    applyMask(size, 2.0),
+    applyMask(size, 3.0)
+  ) / 255.0 : vec4(float(applyMask(size, 0.0)) / 255.0);
 }

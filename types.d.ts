@@ -96,7 +96,6 @@ export interface Msg {
       chunk: number;
       mask?: {
         code: string;
-        count: number;
         offset: number;
       };
       trans:
@@ -134,8 +133,13 @@ export interface Msg {
   };
 
   importSkin: {
-    req: {};
-    resp: {};
+    req: {
+      trans: [source: ImageBitmap];
+    };
+    resp: {
+      width: number;
+      trans: [output: ArrayBufferLike];
+    };
   };
   importData: {
     req: {
@@ -143,14 +147,16 @@ export interface Msg {
       plte: Uint8ClampedArray;
       trans: [source: ImageBitmap, plte: ArrayBufferLike];
     };
-    resp: Texture & {
-      arch: string;
-      trans: [
-        output: ImageBitmap,
-        plte: ArrayBufferLike,
-        data: ArrayBufferLike
-      ];
-    };
+    resp: Texture & { arch: string } & (
+        | { trans: [plte: ArrayBufferLike, data: ArrayBufferLike] }
+        | {
+            trans: [
+              output: ImageBitmap,
+              plte: ArrayBufferLike,
+              data: ArrayBufferLike
+            ];
+          }
+      );
   };
 }
 

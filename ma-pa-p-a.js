@@ -20,6 +20,13 @@ export class App extends EventTarget {
   archives = {};
   archiveNum = 0;
 
+  imported = {
+    /** @type {string[]} */
+    palettes: [],
+    /** @type {string[]} */
+    archives: [],
+  };
+
   dialog = new Dialog();
 
   constructor({
@@ -102,7 +109,6 @@ export class App extends EventTarget {
       if (mask == null) return;
       const palette = this.getPalette(mask.code);
       if (palette == null) return;
-      palette.count += mask.count;
       const refer = palette.refer[arch] ?? (palette.refer[arch] = []);
       refer.push({ chunk, offset: mask.offset });
       const detail = this.iterPalettes(this.sortedPalettes());
@@ -118,18 +124,67 @@ export class App extends EventTarget {
       setTimeout(() => URL.revokeObjectURL(url), 0);
     },
 
-    importSkin: () => {
-      // TODO
+    importSkin: ({ width, trans: [output] }) => {
+      const view = new DataView(output);
+      const height = output.byteLength / width;
+      const { palettes, archives } = this.imported;
+      if (palettes.length === 0) this.layer = 0;
+      const layerEnd = this.layer + height - 1;
+      if (this.layerNum < layerEnd) this.layerNum = layerEnd;
+
+      for (let index = 0, offset = 0; offset < width; index++, offset += 4) {
+        const color = view.getUint32(offset);
+        const code = palettes[index];
+        const palette =
+          (code != null && this.getPalette(code)) || this.computePalette(color);
+        palette.count = 255 - index; // FIXME
+        palettes[index] = palette.code;
+        for (let i = 0; i < height; i++) {
+          const dirty = view.getUint32(i * width + offset);
+          palette.layers[this.layer + i] = dirty === color ? undefined : dirty;
+        }
+      }
+      if (archives.length > 0) {
+        this.imported.archives = [];
+        for (const arch of archives) {
+          const archive = this.archives[arch];
+          if (archive == null) continue;
+          const chunk = archive.chunks[0];
+          if (chunk.texture == null) continue;
+          const colors = this.createSkinColors(arch);
+          const plte = new Uint8ClampedArray(colors);
+          chunk.texture = { ...chunk.texture, plte };
+        }
+      }
+      this.log("info", `load ${height} layer at [${this.layer}-${layerEnd}]`);
+      this.switchLayer(layerEnd);
+      this.flushDirty();
+      this.log("info", `switch to layer ${layerEnd}`);
     },
     importData: ({ arch, data, plte, trans: [output] }) => {
       const { ctx, chunks } = this.archives[arch];
-      const rect = [0, 0, output.width, output.height];
-      chunks.push({ rect, texture: { data, plte } });
-      // TODO
-      const detail = this.iterPalettes(this.sortedPalettes());
-      this.dispatchEvent(new CustomEvent("updatePalette", { detail }));
-      ctx.drawImage(output, 0, 0);
-      output.close();
+      const { rect } = chunks[0];
+      chunks[0] = { rect, texture: { data, plte } };
+      if (output instanceof ImageBitmap) {
+        ctx.drawImage(output, 0, 0);
+        output.close();
+        return;
+      }
+      const colors = this.createSkinColors(arch);
+      if (colors.length === 0) {
+        this.imported.archives.push(arch);
+        return;
+      }
+      plte = new Uint8ClampedArray(colors);
+      this.request("updateChunk", {
+        arch,
+        chunk: 0,
+        rect,
+        visible: null,
+        data,
+        plte,
+        trans: [plte.buffer, data.buffer],
+      });
     },
   };
 
@@ -141,7 +196,7 @@ export class App extends EventTarget {
   sortBy = "count";
 
   sortedPalettes() {
-    /** @type {(palette: Palette) => number[]} */
+    /** @type {(palette: (typeof this.palettes)[0]) => number[]} */
     const sortKeys =
       this.sortBy === "count"
         ? ({ count, color }) => [-count, color]
@@ -150,8 +205,8 @@ export class App extends EventTarget {
       const keys1 = sortKeys(palette1);
       const keys2 = sortKeys(palette2);
       for (let i = 0; i < keys1.length; i++) {
-        const key1 = keys1[0];
-        const key2 = keys2[0];
+        const key1 = keys1[i];
+        const key2 = keys2[i];
         if (key1 < key2) return -1;
         else if (key1 > key2) return 1;
       }
@@ -170,6 +225,17 @@ export class App extends EventTarget {
         }
       }
     }
+  }
+
+  /** @param {string} arch . */
+  createSkinColors(arch) {
+    return this.imported.palettes.flatMap((code, index) => {
+      const palette = this.getPalette(code);
+      if (palette == null) return [0, 0, 0, 0];
+      palette.refer[arch] = [{ chunk: 0, offset: index << 2 }];
+      const color = palette.layers[this.layer] ?? palette.color;
+      return parseRGBA(color);
+    });
   }
 
   /** @type {{[arch: string]: Set<number> }} */ dirtyChunks = {};
@@ -795,8 +861,9 @@ export class App extends EventTarget {
    */
   async parseImageBlob(name, blob) {
     if (name.match(App.REGEX.skin)) {
-      // TODO
-      // return;
+      const bitmap = await loadImageBitmap(blob);
+      this.request("importSkin", { trans: [bitmap] });
+      return;
     }
     const archive = this.createArchive(name);
     if (archive == null) return;
@@ -806,17 +873,10 @@ export class App extends EventTarget {
     archive.size[1] = bitmap.height;
     const arch = archive.name;
     if (arch.match(App.REGEX.data)) {
-      archive.size[0] <<= 2; // rgba => 0,1,2,3
-      const colors = Array.from(
-        this.iterPalettes(this.sortedPalettes()),
-        ({ color, layers }) => layers[this.layer] ?? color
-      ).flatMap(parseRGBA);
-      // TODO
-      const plte = new Uint8ClampedArray(
-        colors.length > 0
-          ? colors
-          : Array.from({ length: 256 }).flatMap((_, i) => [i, i, i, 255])
-      );
+      const rect = [0, 0, bitmap.width, bitmap.height];
+      archive.chunks.push({ rect });
+      const colors = this.createSkinColors(arch);
+      const plte = new Uint8ClampedArray(colors);
       this.request("importData", {
         arch,
         plte,
@@ -883,6 +943,8 @@ export class App extends EventTarget {
     this.layerNum = 1;
     this.palettes = {};
     this.paletteNum = 0;
+    this.imported.palettes = [];
+    this.imported.archives = [];
     this.archives = {};
     this.archiveNum = 0;
     this.dispatchEvent(new CustomEvent("clear"));
