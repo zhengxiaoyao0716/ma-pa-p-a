@@ -485,18 +485,19 @@ class ColorRemap extends WebGL2Service {
    * @returns {Uint8ClampedArray} mapped data
    */
   chunk(rect, data, mask, mapper) {
-    // const width = quatAlign(rect[2]) >> 2;
-    const width = ((rect[2] - 1) >> 2) + 1; // UNPACK_ALIGNMENT
+    const align = quatAlign(rect[2]);
     const height = rect[3];
-    this.reset(width, height);
+    this.reset(align, height);
 
     this.config(rect, data, mask, mapper, false, true);
     this.render();
-    // const mapped = new Uint8ClampedArray(data.length);
-    const mapped = data; // override
+    const mapped = new Uint8ClampedArray((align * height) << 2);
     const { gl } = this;
-    gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, mapped);
-    return mapped;
+    gl.readPixels(0, 0, align, height, gl.RGBA, gl.UNSIGNED_BYTE, mapped);
+    for (let i = 0; i < mapped.length; i += 4) {
+      mapped[i >> 2] = mapped[i];
+    }
+    return mapped.slice(0, mapped.length >> 2);
   }
 
   /**

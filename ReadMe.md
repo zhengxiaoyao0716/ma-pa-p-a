@@ -10,7 +10,7 @@
 
   > Thanks for [Analog studios](https://itch.io/c/1507436/fantasy-)
 
-- [With example dumps](https://zhengxiaoyao0716.github.io/ma-pa-p-a/?fetch=https://raw.githubusercontent.com/zhengxiaoyao0716/ma-pa-p-a/main/.docs/[mppa]%20[8a3f2a]%208x3.skin.png&fetch=https://raw.githubusercontent.com/zhengxiaoyao0716/ma-pa-p-a/main/.docs/[mppa]%20[8a3f2a]%20fPlayer_%20[elf].data.gz)
+- [With example dumps](https://zhengxiaoyao0716.github.io/ma-pa-p-a/?fetch=https://raw.githubusercontent.com/zhengxiaoyao0716/ma-pa-p-a/main/.docs/[mppa]%20[2bf2d5]%2016x2.skin.png&fetch=https://raw.githubusercontent.com/zhengxiaoyao0716/ma-pa-p-a/main/.docs/[mppa]%20[2bf2d5]%20OtakuXDragon.data.gz)
 
 ## Usage
 

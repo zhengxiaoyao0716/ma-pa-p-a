@@ -157,7 +157,7 @@ export class App extends EventTarget {
         }
       }
       this.log("info", `load ${height} layer at [${this.layer}-${layerEnd}]`);
-      this.switchLayer(layerEnd);
+      this.switchLayer(layerEnd, true);
       this.flushDirty();
       this.log("info", `switch to layer ${layerEnd}`);
     },
@@ -627,9 +627,9 @@ export class App extends EventTarget {
   }
 
   /** @param {number} layer . */
-  switchLayer(layer) {
+  switchLayer(layer, force = false) {
     if (this.dirtyBusy > 0) return;
-    if (layer === this.layer) return;
+    if (!force && layer === this.layer) return;
     const old = this.layer;
     if (layer < 0) this.layer = this.layerNum;
     else if (layer > this.layerNum) this.layer = 0;
@@ -639,7 +639,7 @@ export class App extends EventTarget {
     for (const palette of this.iterPalettes(palettes)) {
       if (palette.disable) continue;
       const dirty = palette.layers[this.layer];
-      if (dirty === palette.layers[old]) continue;
+      if (!force && dirty === palette.layers[old]) continue;
       this._setColor(palette, dirty ?? palette.color);
     }
   }
@@ -1066,6 +1066,17 @@ export class App extends EventTarget {
         exportData();
       },
     };
+  }
+
+  /** @param {string} arch . */
+  saveImage(arch) {
+    const archive = this.archives[arch];
+    if (archive == null) return;
+    const url = archive.ctx.canvas.toDataURL("image/png", 1);
+    const name = arch
+      .slice(0, arch.lastIndexOf("."))
+      .replace(App.REGEX.base, "");
+    dumpFile(`${name}.png`, url);
   }
 }
 
@@ -2147,7 +2158,7 @@ function createArchives(app) {
     },
     set name(value) {
       $selectArea.title = value;
-      if (value !== "") app.log("info", `focus on ${value}`);
+      // if (value !== "") app.log("info", `focus on ${value}`);
     },
     posX: 0,
     posY: 0,
@@ -2303,6 +2314,7 @@ function createArchives(app) {
           : "Zoom in area",
       shift: "Select area",
       alt: "Cutout area",
+      save: "Save image",
     });
 
     /** @param {string} type . */
@@ -2331,6 +2343,7 @@ function createArchives(app) {
           }
           return /* show menu */ true;
         },
+        save: () => arch && app.saveImage(arch),
       },
     };
   };
