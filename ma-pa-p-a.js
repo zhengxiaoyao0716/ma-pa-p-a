@@ -137,12 +137,17 @@ export class App extends EventTarget {
         const code = palettes[index];
         const palette =
           (code != null && this.getPalette(code)) || this.computePalette(color);
+        palette.disable = true;
         palette.count = 255 - index; // FIXME
         palettes[index] = palette.code;
         for (let i = 0; i < height; i++) {
           const dirty = view.getUint32(i * width + offset);
           palette.layers[this.layer + i] = dirty === color ? undefined : dirty;
         }
+      }
+      for (const code of palettes) {
+        const palette = this.getPalette(code);
+        palette.disable = false;
       }
       if (archives.length > 0) {
         this.imported.archives = [];
@@ -291,7 +296,10 @@ export class App extends EventTarget {
    * @returns {Palette | undefined}
    */
   getPalette(code) {
-    if (code.length === 8) return this.palettes[code];
+    if (code.length === 8) {
+      const palette = this.palettes[code];
+      return "code" in palette ? palette : palette.split[0];
+    }
     /** @type {{color: number, count: number, split: Palette[]}} */
     const parent = this.palettes[code.slice(0, 8)];
     const i = Number.parseInt(code.slice(8), 16);
